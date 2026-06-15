@@ -46,12 +46,21 @@ export async function callUpstream (config, type, params, init = {}) {
  * Forward Range header and any browser-supplied request headers we
  * want to honour. Excludes hop-by-hop and host-specific headers that
  * bigrandall would otherwise reject or double up.
+ *
+ * `redirect: 'manual'` is important: the Meting-API answers /pic
+ * with a 302 to the upstream cover CDN, and we want to pass that
+ * 302 straight through to the visitor's <img> tag so the browser
+ * fetches the image directly. Without `manual`, the worker's fetch
+ * follows the redirect itself, then hands us whatever the CDN
+ * happens to return (sometimes a 404 for stale ids, sometimes the
+ * raw image bytes — neither is what the browser expects from a
+ * `pic` response).
  */
 function streamInit (request) {
   const headers = {}
   const range = request.headers.get('range')
   if (range) headers.range = range
-  return { method: 'GET', headers }
+  return { method: 'GET', headers, redirect: 'manual' }
 }
 
 /**
