@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>RMusic</title>
   <link rel="stylesheet" href="/widget.css" />
 </head>
@@ -12,26 +12,27 @@
 
   <audio id="audio" preload="metadata"></audio>
 
-  <div class="container">
+  <!-- LRC scroll area — fills the middle of the viewport, intercepts
+       click + drag for seek interactions. -->
+  <div class="container" id="lrc-container">
     <ul class="lrc-list" id="lrc-list"></ul>
   </div>
 
-  <div id="songstatus">
-    <button id="searchToggle" type="button" title="搜索 / 切换" aria-label="搜索">
-      <span aria-hidden="true">⌕</span>
-    </button>
-    <div id="songstatus_pic" tabindex="0" role="button" aria-label="播放 / 暂停">
-      <div id="status_pic"></div>
-      <div id="discpointer_pic"></div>
-    </div>
-  </div>
+  <!-- Top-right search toggle button. Sits alone (no more disc).
+       Clicking opens the search panel. -->
+  <button id="searchToggle" type="button" title="搜索 / 切换" aria-label="搜索">
+    <span aria-hidden="true">⌕</span>
+  </button>
 
+  <!-- Search panel — anchored top-right under the toggle button.
+       Contains source selector + query + results. Shuffle/loop have
+       moved to the bottom control bar. -->
   <div id="search-panel" hidden>
     <div class="search-row">
       <label for="server">服务源</label>
       <select id="server">
-        <option value="tencent" selected>QQ 音乐</option>
-        <option value="netease">网易云</option>
+        <option value="netease" selected>网易云</option>
+        <option value="tencent">QQ 音乐</option>
         <option value="ytmusic">YouTube Music</option>
         <option value="kugou">酷狗</option>
         <option value="baidu">百度</option>
@@ -43,22 +44,46 @@
       <input id="query" type="search" placeholder="搜索曲名 / 歌手 / 关键词" autocomplete="off" />
       <button id="searchBtn" type="button">搜索</button>
     </div>
-    <div class="mode-row">
-      <button id="shuffleBtn" type="button" data-mode="off" title="顺序 / 随机">
-        <span class="mode-icon">→</span><span class="mode-label">顺序</span>
-      </button>
-      <button id="loopBtn" type="button" data-mode="off" title="循环模式">
-        <span class="mode-icon">✗</span><span class="mode-label">不循环</span>
-      </button>
-    </div>
     <ul id="results" class="results-list"></ul>
     <div id="search-status" class="search-status" hidden></div>
   </div>
 
-  <div id="now-playing" hidden>
-    <span id="now-title"></span>
-    <span class="sep">·</span>
-    <span id="now-author"></span>
+  <!-- Bottom-centered control bar. Always visible, even before a
+       track is loaded (transport buttons are just disabled). -->
+  <div id="controls">
+    <div id="now-playing">
+      <span id="now-title">RMusic</span>
+      <span class="sep">·</span>
+      <span id="now-author">点 ⌕ 搜索</span>
+    </div>
+
+    <div id="progress-row">
+      <span id="curr-time" class="time">0:00</span>
+      <div id="progress-bar" role="slider" aria-label="进度" tabindex="0">
+        <div id="progress-buffered"></div>
+        <div id="progress-fill"></div>
+        <div id="progress-thumb"></div>
+      </div>
+      <span id="duration" class="time">0:00</span>
+    </div>
+
+    <div id="control-row">
+      <button id="shuffleBtn" class="ctrl-btn" type="button" data-mode="off" title="顺序 / 随机" aria-label="随机">
+        <span class="ctrl-icon">→</span>
+      </button>
+      <button id="prevBtn" class="ctrl-btn" type="button" title="上一首" aria-label="上一首">
+        <span class="ctrl-icon">⏮</span>
+      </button>
+      <button id="playBtn" class="ctrl-btn ctrl-play" type="button" title="播放 / 暂停" aria-label="播放 / 暂停">
+        <span class="ctrl-icon" id="playIcon">▶</span>
+      </button>
+      <button id="nextBtn" class="ctrl-btn" type="button" title="下一首" aria-label="下一首">
+        <span class="ctrl-icon">⏭</span>
+      </button>
+      <button id="loopBtn" class="ctrl-btn" type="button" data-mode="off" title="循环模式" aria-label="循环">
+        <span class="ctrl-icon">✗</span>
+      </button>
+    </div>
   </div>
 
   <script src="/widget.js" defer></script>

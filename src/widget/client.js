@@ -1,18 +1,19 @@
 /* RMusic widget — client-side controller.
  *
- * Talks only to /api/proxy on the same origin. The worker handles
- * rate limiting, env-token injection, and proxying to the Meting-API
- * binding. No secrets here, no cross-origin calls.
+ * Layout in this revision:
+ *   - top-right ⌕ button toggles the search panel
+ *   - LRC fills the middle, scrolls with playback, and is also a
+ *     seek surface (click a line / drag vertically)
+ *   - bottom-center control bar carries the transport buttons,
+ *     progress bar, shuffle and loop toggles, and the now-playing
+ *     meta
  *
- * Behaviour:
- *   - Click ⌕ → toggle the right-top search panel.
- *   - Pick a server (default ytmusic) + type a query → /api/proxy
- *     returns a list of tracks (already rewritten to point back at
- *     this worker).
- *   - Click a result → that track plays: audio src updated, LRC
- *     fetched and rendered, cover loaded as the page backdrop.
- *   - Click the disc → toggle play/pause (preserves the original
- *     interaction from the startpage widget).
+ * No more spinning disc, no more sub-section in the search panel
+ * for playback modes — shuffle/loop live with the rest of the
+ * transport at the bottom.
+ *
+ * Network: only same-origin /api/proxy. Worker injects the master
+ * token and rate-limits.
  */
 
 (function () {
@@ -23,49 +24,43 @@
   const els = {
     audio:    $('audio'),
     bg:       $('bg'),
+    lrcWrap:  $('lrc-container'),
     lrcList:  $('lrc-list'),
-    songstatus: $('songstatus'),
-    disc:     $('songstatus_pic'),
     searchToggle: $('searchToggle'),
     panel:    $('search-panel'),
     server:   $('server'),
     query:    $('query'),
     searchBtn: $('searchBtn'),
-    shuffleBtn: $('shuffleBtn'),
-    loopBtn:  $('loopBtn'),
     results:  $('results'),
     status:   $('search-status'),
-    nowPlaying: $('now-playing'),
+    // bottom bar
     nowTitle: $('now-title'),
-    nowAuthor: $('now-author')
+    nowAuthor: $('now-author'),
+    currTime: $('curr-time'),
+    duration: $('duration'),
+    progressBar: $('progress-bar'),
+    progressFill: $('progress-fill'),
+    progressBuffered: $('progress-buffered'),
+    progressThumb: $('progress-thumb'),
+    playBtn:  $('playBtn'),
+    playIcon: $('playIcon'),
+    prevBtn:  $('prevBtn'),
+    nextBtn:  $('nextBtn'),
+    shuffleBtn: $('shuffleBtn'),
+    loopBtn:  $('loopBtn')
   }
 
-  // Server-side proxy path. The worker injects the master token, the
-  // search/song/playlist responses already have url/pic/lrc rewritten
-  // to point right back here.
   const API = '/api/proxy'
 
-  // Track list state — we keep the current search result around so a
-  // hot-reload of the LRC or audio doesn't need to refetch metadata.
   let currentResults = []
   let currentIndex = -1
-
-  // LRC state — array of { time, words }, current highlighted line.
   let lrcData = []
 
   /* ---------- Playback modes (shuffle + loop) ----------
    *
-   * Two independent dimensions:
+   * Same semantics as before; only UI placement changed.
    *   shuffleMode: 'off' | 'on'
    *   loopMode:    'off' | 'all' | 'single'
-   *
-   * Behaviour on track end:
-   *   single → replay current
-   *   else if shuffle on → pick a random index
-   *   else → next in order; off stops at the end, all wraps to start
-   *
-   * Persisted to localStorage so an embedded widget remembers the
-   * listener's preference across page reloads.
    */
   const STORAGE_KEY = 'rmusic_playback_mode'
   let shuffleMode = 'off'
@@ -75,7 +70,7 @@
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
     if (saved.shuffle === 'on' || saved.shuffle === 'off') shuffleMode = saved.shuffle
     if (saved.loop === 'off' || saved.loop === 'all' || saved.loop === 'single') loopMode = saved.loop
-  } catch { /* ignore storage errors (private browsing, quota) */ }
+  } catch { /* private mode / quota */ }
 
   function persistMode () {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ shuffle: shuffleMode, loop: loopMode })) } catch {}
@@ -83,14 +78,11 @@
 
   function renderModes () {
     els.shuffleBtn.dataset.mode = shuffleMode
-    els.shuffleBtn.querySelector('.mode-icon').textContent = shuffleMode === 'on' ? '⇄' : '→'
-    els.shuffleBtn.querySelector('.mode-label').textContent = shuffleMode === 'on' ? '随机' : '顺序'
+    els.shuffleBtn.querySelector('.ctrl-icon').textContent = shuffleMode === 'on' ? '⇄' : '→'
 
     els.loopBtn.dataset.mode = loopMode
-    const loopLabels = { off: ['✗', '不循环'], all: ['↻', '全部循环'], single: ['↺', '单曲循环'] }
-    const [icon, label] = loopLabels[loopMode] || loopLabels.off
-    els.loopBtn.querySelector('.mode-icon').textContent = icon
-    els.loopBtn.querySelector('.mode-label').textContent = label
+    const icons = { off: '✗', all: '↻', single: '↺' }
+    els.loopBtn.querySelector('.ctrl-icon').textContent = icons[loopMode] || '✗'
   }
 
   els.shuffleBtn.addEventListener('click', () => {
@@ -118,7 +110,6 @@
     }
   }
   els.searchToggle.addEventListener('click', () => togglePanel())
-  // Esc closes the panel — small UX nicety.
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !els.panel.hasAttribute('hidden')) togglePanel(false)
   })
@@ -139,22 +130,13 @@
 
   async function search () {
     const query = els.query.value.trim()
-    if (!query) {
-      setStatus('请输入关键词')
-      return
-    }
-    const server = els.server.value || 'ytmusic'
+    if (!query) { setStatus('请输入关键词'); return }
+    const server = els.server.value || 'netease'
     setStatus('搜索中…')
     els.results.innerHTML = ''
     try {
-      const usp = new URLSearchParams({
-        server,
-        type: 'search',
-        id: query
-      })
-      const res = await fetch(API + '?' + usp.toString(), {
-        headers: { accept: 'application/json' }
-      })
+      const usp = new URLSearchParams({ server, type: 'search', id: query })
+      const res = await fetch(API + '?' + usp.toString(), { headers: { accept: 'application/json' } })
       if (res.status === 429) {
         setStatus('搜索太频繁,稍等再试 (' + (res.headers.get('retry-after') || '?') + 's)', 'error')
         return
@@ -168,6 +150,7 @@
       currentResults = Array.isArray(data) ? data : []
       renderResults(currentResults)
       setStatus(currentResults.length === 0 ? '无结果' : '共 ' + currentResults.length + ' 条')
+      updateTransportEnabled()
     } catch (e) {
       setStatus('请求失败: ' + (e && e.message ? e.message : e), 'error')
     }
@@ -207,19 +190,20 @@
     })
     showNowPlaying(track)
     setBackdrop(track.pic)
+    setLoading(true)
     await loadLrc(track.lrc)
     els.audio.src = track.url
     els.audio.play().catch(() => {
-      // Browsers can refuse autoplay; the disc click below is the
-      // user gesture that unblocks it.
+      // Browsers can refuse autoplay (first interaction not yet
+      // performed) — the user can hit the play button to unblock.
+      setLoading(false)
     })
+    updateTransportEnabled()
   }
 
   function showNowPlaying (track) {
     els.nowTitle.textContent = track.title || ''
     els.nowAuthor.textContent = track.author || ''
-    if (track.title || track.author) els.nowPlaying.removeAttribute('hidden')
-    else els.nowPlaying.setAttribute('hidden', '')
   }
 
   function setBackdrop (picUrl) {
@@ -230,14 +214,172 @@
     els.bg.style.backgroundImage = "url('" + picUrl.replace(/'/g, "%27") + "')"
   }
 
-  /* ---------- Lyrics ---------- */
+  function updateTransportEnabled () {
+    const hasList = currentResults.length > 0
+    const hasTrack = currentIndex >= 0
+    els.prevBtn.disabled = !hasList
+    els.nextBtn.disabled = !hasList
+    els.playBtn.disabled = !hasTrack && !hasList
+  }
+  updateTransportEnabled()
+
+  /* ---------- Loading indicator ---------- */
+
+  let loadingState = false
+  function setLoading (on) {
+    loadingState = !!on
+    els.playBtn.classList.toggle('loading', loadingState)
+    if (loadingState) els.playIcon.textContent = ''
+    else els.playIcon.textContent = els.audio.paused ? '▶' : '⏸'
+  }
+
+  /* ---------- Transport ---------- */
+
+  function togglePlay () {
+    if (currentIndex < 0) {
+      // No track selected yet — surface the search panel so the
+      // listener picks one.
+      if (currentResults.length > 0) playIndex(0)
+      else togglePanel(true)
+      return
+    }
+    if (els.audio.paused) els.audio.play().catch(() => {})
+    else els.audio.pause()
+  }
+  els.playBtn.addEventListener('click', togglePlay)
+
+  function advance (direction) {
+    if (currentResults.length === 0) return
+    if (currentIndex < 0) { playIndex(0); return }
+    if (shuffleMode === 'on' && currentResults.length > 1) {
+      let next
+      do { next = Math.floor(Math.random() * currentResults.length) } while (next === currentIndex)
+      playIndex(next)
+      return
+    }
+    const next = (currentIndex + direction + currentResults.length) % currentResults.length
+    playIndex(next)
+  }
+  els.prevBtn.addEventListener('click', () => advance(-1))
+  els.nextBtn.addEventListener('click', () => advance(1))
+
+  // End-of-track honoring shuffle + loop:
+  //   loop=single → replay current
+  //   shuffle on  → random index (avoid the same one twice)
+  //   loop=all    → wrap on overflow
+  //   loop=off    → stop on overflow
+  els.audio.addEventListener('ended', () => {
+    if (currentIndex < 0 || currentResults.length === 0) return
+    if (loopMode === 'single') { playIndex(currentIndex); return }
+    if (shuffleMode === 'on') {
+      if (currentResults.length === 1) {
+        if (loopMode === 'all') playIndex(0)
+        return
+      }
+      let next
+      do { next = Math.floor(Math.random() * currentResults.length) } while (next === currentIndex)
+      playIndex(next)
+      return
+    }
+    const next = currentIndex + 1
+    if (next < currentResults.length) playIndex(next)
+    else if (loopMode === 'all') playIndex(0)
+  })
+
+  /* ---------- Audio events → UI ---------- */
+
+  els.audio.addEventListener('play',     () => setLoading(loadingState))
+  els.audio.addEventListener('pause',    () => setLoading(loadingState))
+  els.audio.addEventListener('loadstart', () => setLoading(true))
+  els.audio.addEventListener('waiting',   () => setLoading(true))
+  els.audio.addEventListener('canplay',   () => setLoading(false))
+  els.audio.addEventListener('playing',   () => setLoading(false))
+  els.audio.addEventListener('error', () => {
+    setLoading(false)
+    if (els.audio.src) console.warn('[rmusic] audio error for', els.audio.currentSrc)
+  })
+
+  /* ---------- Progress bar ---------- */
+
+  function formatTime (s) {
+    if (!isFinite(s) || s < 0) return '0:00'
+    const m = Math.floor(s / 60)
+    const r = Math.floor(s % 60)
+    return m + ':' + (r < 10 ? '0' + r : r)
+  }
+
+  function updateProgress () {
+    const t = els.audio.currentTime || 0
+    const d = els.audio.duration || 0
+    els.currTime.textContent = formatTime(t)
+    els.duration.textContent = formatTime(d)
+    const pct = d > 0 ? (t / d) * 100 : 0
+    if (!progressDragging) {
+      els.progressFill.style.width = pct + '%'
+      els.progressThumb.style.left = pct + '%'
+    }
+  }
+  els.audio.addEventListener('timeupdate', updateProgress)
+  els.audio.addEventListener('durationchange', updateProgress)
+
+  function updateBuffered () {
+    const d = els.audio.duration || 0
+    if (d <= 0 || els.audio.buffered.length === 0) {
+      els.progressBuffered.style.width = '0%'
+      return
+    }
+    const end = els.audio.buffered.end(els.audio.buffered.length - 1)
+    els.progressBuffered.style.width = ((end / d) * 100) + '%'
+  }
+  els.audio.addEventListener('progress', updateBuffered)
+  els.audio.addEventListener('timeupdate', updateBuffered)
+
+  // Progress bar drag + click. PointerEvents collapse mouse and
+  // touch into one API; the bar captures the pointer on down so we
+  // get the move/up events even when the finger drifts off-element.
+  let progressDragging = false
+  function pctFromEvent (e) {
+    const rect = els.progressBar.getBoundingClientRect()
+    let x = e.clientX
+    if (x === undefined && e.touches && e.touches[0]) x = e.touches[0].clientX
+    const pct = Math.max(0, Math.min(1, (x - rect.left) / rect.width))
+    return pct
+  }
+  function seekToPct (pct) {
+    const d = els.audio.duration
+    if (!isFinite(d) || d <= 0) return
+    els.audio.currentTime = pct * d
+    els.progressFill.style.width = (pct * 100) + '%'
+    els.progressThumb.style.left = (pct * 100) + '%'
+    els.currTime.textContent = formatTime(pct * d)
+  }
+  els.progressBar.addEventListener('pointerdown', (e) => {
+    if (currentIndex < 0) return
+    progressDragging = true
+    els.progressBar.classList.add('dragging')
+    els.progressBar.setPointerCapture(e.pointerId)
+    seekToPct(pctFromEvent(e))
+  })
+  els.progressBar.addEventListener('pointermove', (e) => {
+    if (!progressDragging) return
+    seekToPct(pctFromEvent(e))
+  })
+  els.progressBar.addEventListener('pointerup', (e) => {
+    if (!progressDragging) return
+    progressDragging = false
+    els.progressBar.classList.remove('dragging')
+    try { els.progressBar.releasePointerCapture(e.pointerId) } catch {}
+  })
+  els.progressBar.addEventListener('pointercancel', () => {
+    progressDragging = false
+    els.progressBar.classList.remove('dragging')
+  })
+
+  /* ---------- LRC: parse + render + auto-scroll ---------- */
 
   async function loadLrc (lrcUrl) {
     lrcData = []
     els.lrcList.innerHTML = ''
-    // Drop the intro flag the moment we know a real track is being
-    // loaded — intro layout is flex-centered, real LRC is transform-
-    // scrolled, and the two don't share a coordinate system.
     delete els.lrcList.dataset.intro
     els.lrcList.style.transform = ''
     if (!lrcUrl) return
@@ -247,18 +389,13 @@
       const text = await res.text()
       lrcData = parseLrc(text)
       renderLrc()
-    } catch {
-      /* swallow — LRC missing is non-fatal, the player still works */
-    }
+    } catch { /* LRC missing is non-fatal */ }
   }
 
   function parseLrc (text) {
     if (!text) return []
     const out = []
     text.split(/\r?\n/).forEach((line) => {
-      // [mm:ss.xx]words OR [mm:ss]words. Multiple [mm:ss] timestamps
-      // on one line repeat the same words at each stamp (common in
-      // chorus LRCs).
       const ms = []
       const re = /\[(\d+):(\d+)(?:\.(\d+))?\]/g
       let m
@@ -277,13 +414,23 @@
 
   function renderLrc () {
     const frag = document.createDocumentFragment()
-    lrcData.forEach((row) => {
+    lrcData.forEach((row, i) => {
       const li = document.createElement('li')
       li.textContent = row.words || '♪'
+      li.dataset.time = String(row.time)
+      li.dataset.index = String(i)
+      // Click a line to seek to its timestamp.
+      li.addEventListener('click', () => {
+        if (lrcDragging) return  // drag-end synthesises a click, ignore
+        const d = els.audio.duration
+        if (!isFinite(d) || d <= 0) return
+        els.audio.currentTime = row.time
+        if (els.audio.paused) els.audio.play().catch(() => {})
+      })
       frag.appendChild(li)
     })
     els.lrcList.appendChild(frag)
-    requestAnimationFrame(setLrcOffset) // initial paint
+    requestAnimationFrame(setLrcOffset)
   }
 
   function findLrcIndex () {
@@ -296,9 +443,11 @@
   }
 
   function setLrcOffset () {
+    if (lrcDragging) return  // user is scrubbing; don't fight them
     if (!lrcData.length || !els.lrcList.children.length) return
+    if (els.lrcList.dataset.intro) return
     const idx = findLrcIndex()
-    const container = els.lrcList.parentElement
+    const container = els.lrcWrap
     const containerH = container.clientHeight
     const liH = els.lrcList.children[0].clientHeight || 50
     const ulH = els.lrcList.clientHeight
@@ -312,78 +461,90 @@
     const next = els.lrcList.children[idx]
     if (next) next.classList.add('active')
   }
-
   els.audio.addEventListener('timeupdate', setLrcOffset)
 
-  /* ---------- Disc play/pause + auto-advance ---------- */
+  /* ---------- LRC drag-to-seek ----------
+   *
+   * Drag the LRC vertically: every line's worth of motion seeks one
+   * line forward/back. Pause auto-scroll while dragging so the
+   * playhead doesn't fight the user's finger. On release, snap to
+   * the line under the centre marker and seek there.
+   */
+  let lrcDragging = false
+  let dragStartY = 0
+  let dragStartTransform = 0
+  let dragMoved = false
 
-  function togglePlay () {
-    if (!els.audio.src) {
-      togglePanel(true)
-      return
-    }
-    if (els.audio.paused) els.audio.play().catch(() => {})
-    else els.audio.pause()
+  function currentTransformY () {
+    const m = (els.lrcList.style.transform || '').match(/translateY\((-?\d+(?:\.\d+)?)px\)/)
+    return m ? parseFloat(m[1]) : 0
   }
-  els.disc.addEventListener('click', togglePlay)
-  els.disc.addEventListener('keydown', (e) => {
-    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePlay() }
-  })
 
-  els.audio.addEventListener('play', () => els.songstatus.classList.add('playing'))
-  els.audio.addEventListener('pause', () => els.songstatus.classList.remove('playing'))
-  // Auto-advance honoring shuffle + loop:
-  //   loop=single   → replay current
-  //   shuffle on    → random other index (avoid the same one twice
-  //                   in a row when the list has more than 1 track)
-  //   loop=all      → wrap to first when reaching the end
-  //   loop=off      → stop at the end
-  els.audio.addEventListener('ended', () => {
-    if (currentIndex < 0 || currentResults.length === 0) return
-    if (loopMode === 'single') {
-      playIndex(currentIndex)
-      return
-    }
-    if (shuffleMode === 'on') {
-      if (currentResults.length === 1) {
-        if (loopMode === 'all') playIndex(0)
-        return
-      }
-      let next
-      do {
-        next = Math.floor(Math.random() * currentResults.length)
-      } while (next === currentIndex)
-      playIndex(next)
-      return
-    }
-    const next = currentIndex + 1
-    if (next < currentResults.length) {
-      playIndex(next)
-    } else if (loopMode === 'all') {
-      playIndex(0)
-    }
+  els.lrcWrap.addEventListener('pointerdown', (e) => {
+    if (!lrcData.length || els.lrcList.dataset.intro) return
+    // Buttons in the LRC slot? None right now, but skip if the
+    // event originated on an <a>/<button> defensively.
+    if (e.target.closest('button, a')) return
+    lrcDragging = true
+    dragMoved = false
+    dragStartY = e.clientY
+    dragStartTransform = currentTransformY()
+    els.lrcWrap.classList.add('dragging')
+    els.lrcWrap.setPointerCapture(e.pointerId)
   })
+  els.lrcWrap.addEventListener('pointermove', (e) => {
+    if (!lrcDragging) return
+    const dy = e.clientY - dragStartY
+    if (Math.abs(dy) > 4) dragMoved = true
+    const newOffset = dragStartTransform + dy
+    els.lrcList.style.transform = 'translateY(' + newOffset + 'px)'
+  })
+  function endLrcDrag (e) {
+    if (!lrcDragging) return
+    lrcDragging = false
+    els.lrcWrap.classList.remove('dragging')
+    try { els.lrcWrap.releasePointerCapture(e.pointerId) } catch {}
+    if (!dragMoved) return  // treat as click; line handler will fire
+    // Figure out which line is closest to the centre of the
+    // container, then seek to its time.
+    const containerH = els.lrcWrap.clientHeight
+    const liH = els.lrcList.children[0]?.clientHeight || 50
+    const offset = currentTransformY()
+    // offset = containerH/2 - liH * idx + liH/2  →  solve for idx
+    const idx = Math.round((containerH / 2 - offset + liH / 2) / liH - 1)
+    const clamped = Math.max(0, Math.min(lrcData.length - 1, idx))
+    const row = lrcData[clamped]
+    if (row && isFinite(row.time)) {
+      els.audio.currentTime = row.time
+      if (els.audio.paused) els.audio.play().catch(() => {})
+    }
+    // Let the timeupdate listener re-centre on the new active line.
+    setLrcOffset()
+  }
+  els.lrcWrap.addEventListener('pointerup', endLrcDrag)
+  els.lrcWrap.addEventListener('pointercancel', endLrcDrag)
 
-  // Network-level error → log to console. The browser fires `error`
-  // for many reasons (CORS, 4xx, decode); we don't auto-retry because
-  // the worker already 429s when rate-limited, and the user can
-  // re-pick from the list.
-  els.audio.addEventListener('error', () => {
-    if (els.audio.src) console.warn('[rmusic] audio error for', els.audio.currentSrc)
-  })
+  // Mouse wheel = same as drag, but in 60px-per-line increments.
+  els.lrcWrap.addEventListener('wheel', (e) => {
+    if (!lrcData.length || els.lrcList.dataset.intro) return
+    e.preventDefault()
+    const liH = els.lrcList.children[0]?.clientHeight || 50
+    const lineDelta = e.deltaY > 0 ? 1 : -1
+    const idx = Math.max(0, Math.min(lrcData.length - 1, (findLrcIndex() < 0 ? 0 : findLrcIndex()) + lineDelta))
+    const row = lrcData[idx]
+    if (row && isFinite(row.time)) {
+      els.audio.currentTime = row.time
+      if (els.audio.paused) els.audio.play().catch(() => {})
+      setLrcOffset()
+    }
+    void liH
+  }, { passive: false })
 
   /* ---------- First-paint intro state ----------
    *
-   * Without an intro the page would render as plain black with an
-   * empty middle until someone searched — the exact opposite of
-   * the original startpage widget, which always had a track + LRC
-   * loaded so the lyrics + blurred cover were there immediately.
-   * We can't preload a real track here without burning rate limit
-   * on every visitor, so we fake it: a handful of static lines in
-   * the LRC slot, plus the CSS radial-vignette backdrop on
-   * .background, give the page a presence on first paint that
-   * gets seamlessly replaced when the listener picks a real
-   * track.
+   * Keep the page from looking like a blank black slab before the
+   * first track loads. CSS supplies the radial backdrop; this
+   * paints a handful of static hint lines into the LRC slot.
    */
   function renderIntro () {
     if (lrcData.length || currentResults.length) return
@@ -393,9 +554,9 @@
     const lines = [
       'RMusic',
       '点击右上角 ⌕ 搜一首歌',
-      '默认 QQ 音乐 · 可换其他源',
-      '随机 / 顺序 · 全部 / 单曲循环',
-      '点击唱片 暂停 / 继续'
+      '默认网易云 · 可换其他源',
+      '点歌词或拖动可调整进度',
+      '随机 / 顺序 · 全部 / 单曲循环'
     ]
     const activeIdx = 1
     const frag = document.createDocumentFragment()
