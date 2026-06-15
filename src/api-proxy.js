@@ -55,13 +55,18 @@ function streamInit (request) {
 }
 
 /**
- * Build the public-facing URL on this worker that the widget should
- * hit. We embed server/type/id only — no auth, no token. The proxy
- * re-mints them server-side from the env binding.
+ * Build the public-facing URL the widget should hit. Emitted as a
+ * scheme-and-host-less path so the browser resolves it against the
+ * page's own origin. Side-steps the whole `x-forwarded-proto` /
+ * `url.origin === http://...-internal-...` mess that bigrandall's
+ * edge layer creates — whatever protocol the visitor came in on,
+ * a relative URL stays on that protocol with no inference needed.
+ * Only carries server/type/id — auth and token get re-minted server-
+ * side on the next round-trip.
  */
-function publicProxyUrl (baseOrigin, server, type, id) {
+function publicProxyUrl (server, type, id) {
   const usp = new URLSearchParams({ server, type, id: String(id) })
-  return `${baseOrigin}${WIDGET_REWRITTEN_PATH}?${usp}`
+  return `${WIDGET_REWRITTEN_PATH}?${usp}`
 }
 
 /**
@@ -72,7 +77,7 @@ function publicProxyUrl (baseOrigin, server, type, id) {
  * us — so we strip it and let our /api/proxy re-mint with the same
  * master token at call time.
  */
-function rewriteTrackList (tracks, baseOrigin, server) {
+function rewriteTrackList (tracks, server) {
   return tracks.map((t) => {
     // Use the Meting-API's url to extract the per-resource id. The
     // shape is `<host>/api?server=...&type=url&id=<X>&auth=...` —
@@ -83,9 +88,9 @@ function rewriteTrackList (tracks, baseOrigin, server) {
     return {
       title: t.title,
       author: t.author,
-      url: urlId ? publicProxyUrl(baseOrigin, server, 'url', urlId) : t.url,
-      pic: picId ? publicProxyUrl(baseOrigin, server, 'pic', picId) : t.pic,
-      lrc: lrcId ? publicProxyUrl(baseOrigin, server, 'lrc', lrcId) : t.lrc
+      url: urlId ? publicProxyUrl(server, 'url', urlId) : t.url,
+      pic: picId ? publicProxyUrl(server, 'pic', picId) : t.pic,
+      lrc: lrcId ? publicProxyUrl(server, 'lrc', lrcId) : t.lrc
     }
   })
 }
@@ -105,7 +110,7 @@ function pickIdFromUrl (u) {
  * Handles auth-bearing types (url/pic/lrc) and metadata types
  * (search/song/album/artist/playlist) the same way: forward, decorate.
  */
-export async function proxyApi (request, config, params, baseOrigin) {
+export async function proxyApi (request, config, params) {
   const { server, type, id, r } = params
   const upstream = await callUpstream(
     config,
@@ -169,7 +174,7 @@ export async function proxyApi (request, config, params, baseOrigin) {
     return passThrough(upstream)
   }
   const rewritten = Array.isArray(payload)
-    ? rewriteTrackList(payload, baseOrigin, server)
+    ? rewriteTrackList(payload, server)
     : payload
   return new Response(JSON.stringify(rewritten), {
     status: 200,

@@ -132,21 +132,14 @@ async function route (request, env) {
       id: url.searchParams.get('id') ?? '',
       r: url.searchParams.get('r') ?? undefined
     }
-    // Rewriting needs the externally-visible origin, not what the
-    // worker sees on the inside of the bigrandall edge. The edge
-    // terminates TLS and forwards to the worker over plain HTTP, so
-    // request.url's protocol comes through as `http:` even when the
-    // visitor loaded the widget over HTTPS. If we used url.origin
-    // verbatim the embedded url/pic/lrc would all be `http://...`
-    // and a mixed-content-aware browser would block the audio.
-    //
-    // x-forwarded-proto is what bigrandall (and CF / nginx /
-    // caddy / etc.) sets. Fall through to url.protocol only for
-    // strictly-local development.
-    const forwardedProto = request.headers.get('x-forwarded-proto')
-    const proto = forwardedProto || url.protocol.slice(0, -1)
-    const baseOrigin = `${proto}://${url.host}`
-    const response = await proxyApi(request, config, params, baseOrigin)
+    // Rewriting emits relative paths (`/api/proxy?...`) so the
+    // browser resolves them against whatever origin the page itself
+    // loaded from. No `url.origin` to guess — sidesteps the
+    // bigrandall edge's HTTP-to-worker forwarding that makes
+    // request.url's protocol look like plain `http:` even on HTTPS
+    // visitors (which used to be a mixed-content trap when the
+    // rewritten audio src ended up `http://…`).
+    const response = await proxyApi(request, config, params)
     // Stamp the rate-limit headers on success too, so a polite
     // client can pace itself rather than wait for a 429.
     const out = new Headers(response.headers)
