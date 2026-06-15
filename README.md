@@ -33,7 +33,7 @@
 1. 控制台 *connect a GitHub repo*，指向 `RandallAnjie/rmusic-widget` 分支 `main`
 2. Build config:
    - build command: `npm install && npm run build`
-   - output file: `dist/worker.js`
+   - output file: `dist/_worker.js`（下划线是 CF Pages catch-all 约定，pages / workers 两种模式都识别）
    - compatibility flag: 无（没用 node 内置）
 3. Env / service bindings:
    - **service binding** `MUSIC_API` → 已经在跑的 Meting-API worker

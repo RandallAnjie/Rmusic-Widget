@@ -7,7 +7,7 @@
 1. 控制台 *connect a GitHub repo* → 选 `RandallAnjie/rmusic-widget`，分支 `main`，用 Deploy Key
 2. **Build config**
    - build command: `npm install && npm run build`
-   - output file: `dist/worker.js`
+   - output file: `dist/_worker.js`（pages 模式下也是这个路径——下划线前缀是 CF Pages catch-all 函数的约定，bigrandall 沿用，两种模式都识别）
    - 不需要 `nodejs_compat`（这个 worker 没用 `node:` 任何东西）
 3. **Service binding**
    - 在 worker 的 *Bindings* 面板里加：

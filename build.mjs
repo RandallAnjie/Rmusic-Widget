@@ -37,7 +37,12 @@ await build({
     __WIDGET_CSS__: JSON.stringify(widgetCss),
     __WIDGET_JS__: JSON.stringify(widgetJs)
   },
-  outfile: 'dist/worker.js',
+  // Output filename is the underscore-prefixed `_worker.js` so a
+  // bigrandall *pages-mode* deployment recognises it as the catch-
+  // all function (CF Pages convention). In *workers-mode* the
+  // operator just points the "output file" knob at this same path
+  // — works for both setups without code changes.
+  outfile: 'dist/_worker.js',
   legalComments: 'none',
   logLevel: 'info'
 })
