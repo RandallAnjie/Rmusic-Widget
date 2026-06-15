@@ -132,11 +132,20 @@ async function route (request, env) {
       id: url.searchParams.get('id') ?? '',
       r: url.searchParams.get('r') ?? undefined
     }
-    // Trust the worker's host header for rewriting embedded urls. If
-    // the operator has fronted us with a proxy that rewrites Host we
-    // could pull from `x-forwarded-host` instead, but that's a knob
-    // for later.
-    const baseOrigin = url.origin
+    // Rewriting needs the externally-visible origin, not what the
+    // worker sees on the inside of the bigrandall edge. The edge
+    // terminates TLS and forwards to the worker over plain HTTP, so
+    // request.url's protocol comes through as `http:` even when the
+    // visitor loaded the widget over HTTPS. If we used url.origin
+    // verbatim the embedded url/pic/lrc would all be `http://...`
+    // and a mixed-content-aware browser would block the audio.
+    //
+    // x-forwarded-proto is what bigrandall (and CF / nginx /
+    // caddy / etc.) sets. Fall through to url.protocol only for
+    // strictly-local development.
+    const forwardedProto = request.headers.get('x-forwarded-proto')
+    const proto = forwardedProto || url.protocol.slice(0, -1)
+    const baseOrigin = `${proto}://${url.host}`
     const response = await proxyApi(request, config, params, baseOrigin)
     // Stamp the rate-limit headers on success too, so a polite
     // client can pace itself rather than wait for a 429.
