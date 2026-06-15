@@ -1,0 +1,344 @@
+/* RMusic widget — kept close to the original startpage music_player
+ * look (blurred cover backdrop, scrolling LRC, spinning disc top-
+ * right) so the visual identity carries over. The new pieces — the
+ * 右上角 search panel and the now-playing strip — are tonally
+ * matched: same off-black background, same muted text, same blur
+ * accents. */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #999;
+  text-align: center;
+  background: #050505;
+  overflow: hidden;
+}
+
+.background {
+  position: fixed;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(30px) brightness(0.65);
+  transform: scale(1.1);
+  transition: background-image 0.6s ease;
+  z-index: -1;
+}
+
+/* LRC list ---------------------------------------------------------- */
+
+.container {
+  position: absolute;
+  inset: 10% 0 10% 0;
+  width: 100%;
+  overflow: hidden;
+  color: #888;
+  text-align: center;
+}
+.container ul {
+  transition: transform 0.6s ease;
+  list-style: none;
+}
+.container li {
+  height: 50px;
+  line-height: 50px;
+  filter: blur(1px);
+  transition: filter 0.6s ease, color 0.6s ease, transform 0.6s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 24px;
+}
+.container li.active {
+  color: #fff;
+  transform: scale(1.6);
+  filter: blur(0);
+}
+
+/* Top-right cluster: search toggle + spinning disc ------------------ */
+
+#songstatus {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 200px;
+  height: 90px;
+  padding-top: 5px;
+  z-index: 1000;
+}
+
+#searchToggle {
+  position: absolute;
+  top: 14px;
+  right: 140px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(20, 20, 20, 0.55);
+  color: #ddd;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+}
+#searchToggle:hover,
+#searchToggle:focus-visible {
+  background: rgba(40, 40, 40, 0.75);
+  color: #fff;
+  transform: scale(1.05);
+  outline: none;
+}
+#searchToggle.active {
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+}
+
+#songstatus_pic {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 80px;
+  height: 80px;
+  cursor: pointer;
+  outline: none;
+}
+#songstatus_pic:focus-visible {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+}
+
+#status_pic {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background-image: url("data:image/png;base64,__DISC_B64__");
+  background-size: cover;
+  background-position: center;
+  transition: width 0.4s ease, height 0.4s ease;
+}
+#discpointer_pic {
+  position: absolute;
+  top: 0;
+  right: 25px;
+  width: 50px;
+  height: 40px;
+  background-image: url("data:image/png;base64,__POINTER_B64__");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: top center;
+  transition: width 0.4s ease, height 0.4s ease;
+  pointer-events: none;
+}
+#songstatus.playing #status_pic {
+  width: 100px;
+  height: 100px;
+  animation: rotate 8s linear infinite;
+}
+#songstatus.playing #discpointer_pic {
+  width: 70px;
+  height: 70px;
+}
+
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Search panel ------------------------------------------------------ */
+
+#search-panel {
+  position: fixed;
+  top: 100px;
+  right: 20px;
+  width: 320px;
+  max-height: calc(100vh - 140px);
+  background: rgba(15, 15, 15, 0.88);
+  color: #ddd;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 14px;
+  z-index: 999;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#search-panel[hidden] {
+  display: none;
+}
+
+.search-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.search-row label {
+  width: 56px;
+  flex: 0 0 56px;
+  font-size: 12px;
+  color: #999;
+  text-align: left;
+}
+.search-row select,
+.search-row input,
+.search-row button {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #eee;
+  padding: 6px 8px;
+  border-radius: 5px;
+  font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.search-row select,
+.search-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.search-row button {
+  flex: 0 0 auto;
+  background: rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  font-family: inherit;
+}
+.search-row button:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.results-list {
+  list-style: none;
+  overflow-y: auto;
+  max-height: 50vh;
+  margin: 4px -6px 0 -6px;
+}
+.results-list li {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.results-list li:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.results-list li.playing {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.results-list .row-title {
+  font-size: 13px;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.results-list .row-author {
+  font-size: 11px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.search-status {
+  font-size: 12px;
+  color: #aaa;
+  padding: 4px 6px;
+}
+.search-status[hidden] {
+  display: none;
+}
+.search-status.error {
+  color: #ff8b6b;
+}
+
+/* Now-playing footer ----------------------------------------------- */
+
+#now-playing {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  background: rgba(15, 15, 15, 0.6);
+  color: #ccc;
+  border-radius: 999px;
+  font-size: 12px;
+  z-index: 998;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  max-width: 80vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#now-playing[hidden] {
+  display: none;
+}
+#now-playing .sep {
+  margin: 0 6px;
+  opacity: 0.6;
+}
+
+/* Version-info ----------------------------------------------------- */
+
+#version-info {
+  text-align: left;
+  position: fixed;
+  left: 10px;
+  bottom: 10px;
+  padding: 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: rgba(180, 180, 180, 0.55);
+  z-index: 9999;
+  transition: all 0.3s ease;
+  overflow: hidden;
+  max-height: 20px;
+  max-width: 380px;
+}
+#version-info:hover {
+  color: #eee;
+  background-color: rgba(40, 40, 40, 0.7);
+  max-height: 220px;
+}
+.update-details {
+  opacity: 0;
+  max-height: 0;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  line-height: 1.6;
+}
+#version-info:hover .update-details {
+  opacity: 1;
+  max-height: 200px;
+  margin-top: 6px;
+}
+
+/* Small viewport tweaks -------------------------------------------- */
+
+@media (max-width: 480px) {
+  #search-panel {
+    width: calc(100vw - 24px);
+    right: 12px;
+    top: 90px;
+  }
+  #songstatus { width: 160px; }
+  #searchToggle { right: 110px; }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "rmusic-widget",
+  "version": "0.1.0",
+  "main": "src/worker.js",
+  "type": "module",
+  "author": "Randall",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "lint": "oxlint ."
+  },
+  "dependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "devDependencies": {
+    "oxlint": "^1.2.0"
+  }
+}
