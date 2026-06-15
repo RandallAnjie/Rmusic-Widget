@@ -235,6 +235,11 @@
   async function loadLrc (lrcUrl) {
     lrcData = []
     els.lrcList.innerHTML = ''
+    // Drop the intro flag the moment we know a real track is being
+    // loaded — intro layout is flex-centered, real LRC is transform-
+    // scrolled, and the two don't share a coordinate system.
+    delete els.lrcList.dataset.intro
+    els.lrcList.style.transform = ''
     if (!lrcUrl) return
     try {
       const res = await fetch(lrcUrl)
@@ -367,8 +372,40 @@
     if (els.audio.src) console.warn('[rmusic] audio error for', els.audio.currentSrc)
   })
 
-  /* ---------- First-paint state ---------- */
-
-  // No track loaded → disc reveals the panel so the user can search.
-  // (The visible disc + ⌕ button hint is enough; no auto-open.)
+  /* ---------- First-paint intro state ----------
+   *
+   * Without an intro the page would render as plain black with an
+   * empty middle until someone searched — the exact opposite of
+   * the original startpage widget, which always had a track + LRC
+   * loaded so the lyrics + blurred cover were there immediately.
+   * We can't preload a real track here without burning rate limit
+   * on every visitor, so we fake it: a handful of static lines in
+   * the LRC slot, plus the CSS radial-vignette backdrop on
+   * .background, give the page a presence on first paint that
+   * gets seamlessly replaced when the listener picks a real
+   * track.
+   */
+  function renderIntro () {
+    if (lrcData.length || currentResults.length) return
+    els.lrcList.innerHTML = ''
+    els.lrcList.dataset.intro = '1'
+    els.lrcList.style.transform = ''
+    const lines = [
+      'RMusic',
+      '点击右上角 ⌕ 搜一首歌',
+      '默认 QQ 音乐 · 可换其他源',
+      '随机 / 顺序 · 全部 / 单曲循环',
+      '点击唱片 暂停 / 继续'
+    ]
+    const activeIdx = 1
+    const frag = document.createDocumentFragment()
+    lines.forEach((s, i) => {
+      const li = document.createElement('li')
+      li.className = 'intro' + (i === activeIdx ? ' active' : '')
+      li.textContent = s
+      frag.appendChild(li)
+    })
+    els.lrcList.appendChild(frag)
+  }
+  renderIntro()
 })()
