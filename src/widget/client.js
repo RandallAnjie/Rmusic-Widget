@@ -419,14 +419,10 @@
       li.textContent = row.words || '♪'
       li.dataset.time = String(row.time)
       li.dataset.index = String(i)
-      // Click a line to seek to its timestamp.
-      li.addEventListener('click', () => {
-        if (lrcDragging) return  // drag-end synthesises a click, ignore
-        const d = els.audio.duration
-        if (!isFinite(d) || d <= 0) return
-        els.audio.currentTime = row.time
-        if (els.audio.paused) els.audio.play().catch(() => {})
-      })
+      // No per-li click listener — taps are detected in
+      // endLrcDrag's "didn't move" branch by reading e.target.
+      // Avoids the double-seek that happens when browsers
+      // synthesise a click after pointerup at the end of a drag.
       frag.appendChild(li)
     })
     els.lrcList.appendChild(frag)
@@ -504,9 +500,20 @@
     lrcDragging = false
     els.lrcWrap.classList.remove('dragging')
     try { els.lrcWrap.releasePointerCapture(e.pointerId) } catch {}
-    if (!dragMoved) return  // treat as click; line handler will fire
-    // Figure out which line is closest to the centre of the
-    // container, then seek to its time.
+    if (!dragMoved) {
+      // It was a tap. Find the <li> under the pointer (e.target can
+      // be the inner text node) and seek to its timestamp.
+      const li = e.target && e.target.closest ? e.target.closest('li') : null
+      if (!li || !li.dataset.time) return
+      const t = parseFloat(li.dataset.time)
+      if (!isNaN(t)) {
+        els.audio.currentTime = t
+        if (els.audio.paused) els.audio.play().catch(() => {})
+      }
+      return
+    }
+    // Drag-end: snap to whichever line is now closest to the centre
+    // of the container and seek there.
     const containerH = els.lrcWrap.clientHeight
     const liH = els.lrcList.children[0]?.clientHeight || 50
     const offset = currentTransformY()
