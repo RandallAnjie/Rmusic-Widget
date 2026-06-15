@@ -77,12 +77,23 @@
   }
 
   function renderModes () {
-    els.shuffleBtn.dataset.mode = shuffleMode
-    els.shuffleBtn.querySelector('.ctrl-icon').textContent = shuffleMode === 'on' ? '⇄' : '→'
-
-    els.loopBtn.dataset.mode = loopMode
-    const icons = { off: '✗', all: '↻', single: '↺' }
-    els.loopBtn.querySelector('.ctrl-icon').textContent = icons[loopMode] || '✗'
+    // Null-guard every children-of-element lookup so a stale HTML
+    // shape doesn't crash the whole bootstrap. Iteration on this
+    // widget has rotated icon containers (`.mode-icon` → `.ctrl-
+    // icon`) at least once; CDN cache vs browser cache races have
+    // produced visitors with mismatched HTML / JS pairs that
+    // crashed at the first .querySelector(...).textContent.
+    if (els.shuffleBtn) {
+      els.shuffleBtn.dataset.mode = shuffleMode
+      const shuffleIcon = els.shuffleBtn.querySelector('.ctrl-icon')
+      if (shuffleIcon) shuffleIcon.textContent = shuffleMode === 'on' ? '⇄' : '→'
+    }
+    if (els.loopBtn) {
+      els.loopBtn.dataset.mode = loopMode
+      const icons = { off: '✗', all: '↻', single: '↺' }
+      const loopIcon = els.loopBtn.querySelector('.ctrl-icon')
+      if (loopIcon) loopIcon.textContent = icons[loopMode] || '✗'
+    }
   }
 
   els.shuffleBtn.addEventListener('click', () => {

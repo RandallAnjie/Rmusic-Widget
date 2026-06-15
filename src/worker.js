@@ -66,13 +66,17 @@ async function route (request, env) {
   const config = buildConfig(env)
 
   if (url.pathname === '/' || url.pathname === '') {
-    // The widget HTML references /widget.css and /widget.js. Both
-    // shipped as separate files so the browser caches them across
-    // navigations, instead of inlining them into every shell render.
+    // HTML carries the source of truth for which asset hash is
+    // current. Short cache so a redeploy's new asset URLs (the
+    // `?v=…` hash baked in by build.mjs) reach the visitor's
+    // browser quickly. The CSS / JS themselves can then be cached
+    // moderately long — their URL is uniquely tied to their bytes
+    // via the hash query param, so a content change always shows
+    // up at a fresh URL.
     return new Response(WIDGET_HTML, {
       headers: {
         'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'public, max-age=300'
+        'cache-control': 'public, max-age=30, must-revalidate'
       }
     })
   }
@@ -80,7 +84,10 @@ async function route (request, env) {
     return new Response(WIDGET_CSS, {
       headers: {
         'content-type': 'text/css; charset=utf-8',
-        'cache-control': 'public, max-age=3600'
+        // 60 s is short enough that a CDN cache miss after redeploy
+        // resolves on its own without flushing, yet long enough to
+        // dedup repeat visits within a session.
+        'cache-control': 'public, max-age=60'
       }
     })
   }
@@ -88,7 +95,7 @@ async function route (request, env) {
     return new Response(WIDGET_JS, {
       headers: {
         'content-type': 'text/javascript; charset=utf-8',
-        'cache-control': 'public, max-age=3600'
+        'cache-control': 'public, max-age=60'
       }
     })
   }

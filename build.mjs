@@ -7,13 +7,26 @@
 //      one in workerd) and the dist bundle ships as a single file.
 
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 import { build } from 'esbuild'
 
 const read = (p) => fs.readFileSync(p, 'utf8')
 
-const widgetHtml = read('src/widget/index.html')
 const widgetCss = read('src/widget/index.css')
 const widgetJs = read('src/widget/client.js')
+
+// Content-hash the two changing assets and stitch the hash into the
+// HTML's `<link>` and `<script>` URLs so a redeploy guarantees fresh
+// asset fetches even past any CDN / browser cache. Eight base16 chars
+// of sha-1 are more than enough — one collision per ~4e9 builds.
+const assetHash = crypto
+  .createHash('sha1')
+  .update(widgetCss)
+  .update(widgetJs)
+  .digest('hex')
+  .slice(0, 8)
+const widgetHtml = read('src/widget/index.html').replaceAll('__ASSET_HASH__', assetHash)
+console.log('  asset hash:', assetHash)
 
 await build({
   entryPoints: ['src/worker.js'],
