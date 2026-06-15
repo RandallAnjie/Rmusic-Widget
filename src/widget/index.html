@@ -30,9 +30,9 @@
     <div class="search-row">
       <label for="server">服务源</label>
       <select id="server">
-        <option value="ytmusic" selected>YouTube Music</option>
+        <option value="tencent" selected>QQ 音乐</option>
         <option value="netease">网易云</option>
-        <option value="tencent">QQ 音乐</option>
+        <option value="ytmusic">YouTube Music</option>
         <option value="kugou">酷狗</option>
         <option value="baidu">百度</option>
         <option value="kuwo">酷我</option>
@@ -43,6 +43,14 @@
       <input id="query" type="search" placeholder="搜索曲名 / 歌手 / 关键词" autocomplete="off" />
       <button id="searchBtn" type="button">搜索</button>
     </div>
+    <div class="mode-row">
+      <button id="shuffleBtn" type="button" data-mode="off" title="顺序 / 随机">
+        <span class="mode-icon">→</span><span class="mode-label">顺序</span>
+      </button>
+      <button id="loopBtn" type="button" data-mode="off" title="循环模式">
+        <span class="mode-icon">✗</span><span class="mode-label">不循环</span>
+      </button>
+    </div>
     <ul id="results" class="results-list"></ul>
     <div id="search-status" class="search-status" hidden></div>
   </div>
@@ -51,17 +59,6 @@
     <span id="now-title"></span>
     <span class="sep">·</span>
     <span id="now-author"></span>
-  </div>
-
-  <div id="version-info">
-    RMusic widget
-    <div class="update-details">
-      搜索接 Meting-API,token 走 worker env,无密码直接用。
-      <br />
-      点击右上角 ⌕ 展开搜索面板,默认 YouTube Music。
-      <br />
-      点唱片切换播放 / 暂停。
-    </div>
   </div>
 
   <script src="/widget.js" defer></script>

@@ -31,6 +31,8 @@
     server:   $('server'),
     query:    $('query'),
     searchBtn: $('searchBtn'),
+    shuffleBtn: $('shuffleBtn'),
+    loopBtn:  $('loopBtn'),
     results:  $('results'),
     status:   $('search-status'),
     nowPlaying: $('now-playing'),
@@ -50,6 +52,57 @@
 
   // LRC state — array of { time, words }, current highlighted line.
   let lrcData = []
+
+  /* ---------- Playback modes (shuffle + loop) ----------
+   *
+   * Two independent dimensions:
+   *   shuffleMode: 'off' | 'on'
+   *   loopMode:    'off' | 'all' | 'single'
+   *
+   * Behaviour on track end:
+   *   single → replay current
+   *   else if shuffle on → pick a random index
+   *   else → next in order; off stops at the end, all wraps to start
+   *
+   * Persisted to localStorage so an embedded widget remembers the
+   * listener's preference across page reloads.
+   */
+  const STORAGE_KEY = 'rmusic_playback_mode'
+  let shuffleMode = 'off'
+  let loopMode = 'off'
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+    if (saved.shuffle === 'on' || saved.shuffle === 'off') shuffleMode = saved.shuffle
+    if (saved.loop === 'off' || saved.loop === 'all' || saved.loop === 'single') loopMode = saved.loop
+  } catch { /* ignore storage errors (private browsing, quota) */ }
+
+  function persistMode () {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ shuffle: shuffleMode, loop: loopMode })) } catch {}
+  }
+
+  function renderModes () {
+    els.shuffleBtn.dataset.mode = shuffleMode
+    els.shuffleBtn.querySelector('.mode-icon').textContent = shuffleMode === 'on' ? '⇄' : '→'
+    els.shuffleBtn.querySelector('.mode-label').textContent = shuffleMode === 'on' ? '随机' : '顺序'
+
+    els.loopBtn.dataset.mode = loopMode
+    const loopLabels = { off: ['✗', '不循环'], all: ['↻', '全部循环'], single: ['↺', '单曲循环'] }
+    const [icon, label] = loopLabels[loopMode] || loopLabels.off
+    els.loopBtn.querySelector('.mode-icon').textContent = icon
+    els.loopBtn.querySelector('.mode-label').textContent = label
+  }
+
+  els.shuffleBtn.addEventListener('click', () => {
+    shuffleMode = shuffleMode === 'on' ? 'off' : 'on'
+    persistMode(); renderModes()
+  })
+  els.loopBtn.addEventListener('click', () => {
+    const cycle = { off: 'all', all: 'single', single: 'off' }
+    loopMode = cycle[loopMode] || 'off'
+    persistMode(); renderModes()
+  })
+  renderModes()
 
   /* ---------- Search panel toggle ---------- */
 
@@ -274,11 +327,35 @@
 
   els.audio.addEventListener('play', () => els.songstatus.classList.add('playing'))
   els.audio.addEventListener('pause', () => els.songstatus.classList.remove('playing'))
-  // Auto-advance — when the current track ends, play the next one in
-  // the result list if there is one.
+  // Auto-advance honoring shuffle + loop:
+  //   loop=single   → replay current
+  //   shuffle on    → random other index (avoid the same one twice
+  //                   in a row when the list has more than 1 track)
+  //   loop=all      → wrap to first when reaching the end
+  //   loop=off      → stop at the end
   els.audio.addEventListener('ended', () => {
-    if (currentIndex >= 0 && currentIndex + 1 < currentResults.length) {
-      playIndex(currentIndex + 1)
+    if (currentIndex < 0 || currentResults.length === 0) return
+    if (loopMode === 'single') {
+      playIndex(currentIndex)
+      return
+    }
+    if (shuffleMode === 'on') {
+      if (currentResults.length === 1) {
+        if (loopMode === 'all') playIndex(0)
+        return
+      }
+      let next
+      do {
+        next = Math.floor(Math.random() * currentResults.length)
+      } while (next === currentIndex)
+      playIndex(next)
+      return
+    }
+    const next = currentIndex + 1
+    if (next < currentResults.length) {
+      playIndex(next)
+    } else if (loopMode === 'all') {
+      playIndex(0)
     }
   })
 

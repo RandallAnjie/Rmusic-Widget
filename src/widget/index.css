@@ -53,13 +53,16 @@ html, body {
   transition: filter 0.6s ease, color 0.6s ease, transform 0.6s ease;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   padding: 0 24px;
 }
+/* Bigger, brighter active line to match the original startpage
+ * widget's "very 帅" feeling — the un-active lines fall back a touch
+ * (blur + dimmer) so the contrast carries. */
 .container li.active {
   color: #fff;
-  transform: scale(1.6);
+  transform: scale(1.8);
   filter: blur(0);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
 /* Top-right cluster: search toggle + spinning disc ------------------ */
@@ -296,39 +299,46 @@ html, body {
   opacity: 0.6;
 }
 
-/* Version-info ----------------------------------------------------- */
+/* Playback mode controls — shuffle + loop. Inline strip just above
+ * the results list so the controls are right next to the playlist
+ * they're modifying. State lives in `data-mode` on each button; the
+ * client.js cycles the values and tweaks the icon + label inline. */
 
-#version-info {
-  text-align: left;
-  position: fixed;
-  left: 10px;
-  bottom: 10px;
-  padding: 10px;
+.mode-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+.mode-row button {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 8px;
   border-radius: 5px;
-  font-size: 12px;
-  color: rgba(180, 180, 180, 0.55);
-  z-index: 9999;
-  transition: all 0.3s ease;
-  overflow: hidden;
-  max-height: 20px;
-  max-width: 380px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #aaa;
+  font: 12px ui-sans-serif, system-ui;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
-#version-info:hover {
+.mode-row button:hover {
+  background: rgba(255, 255, 255, 0.1);
   color: #eee;
-  background-color: rgba(40, 40, 40, 0.7);
-  max-height: 220px;
 }
-.update-details {
-  opacity: 0;
-  max-height: 0;
-  overflow: hidden;
-  transition: all 0.3s ease;
-  line-height: 1.6;
+.mode-row button[data-mode="on"],
+.mode-row button[data-mode="all"],
+.mode-row button[data-mode="single"] {
+  background: rgba(120, 180, 255, 0.18);
+  border-color: rgba(140, 190, 255, 0.5);
+  color: #d6e8ff;
 }
-#version-info:hover .update-details {
-  opacity: 1;
-  max-height: 200px;
-  margin-top: 6px;
+.mode-row .mode-icon {
+  font-size: 14px;
+  line-height: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 /* Small viewport tweaks -------------------------------------------- */
