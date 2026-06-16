@@ -172,7 +172,7 @@ export async function proxyApi (request, config, params) {
   }
 
   // Lrc path: text/plain, stream-through.
-  if (type === 'lrc') {
+  if (type === 'lrc' || type === 'lrcpword') {
     const out = new Headers()
     copyHeader(upstream.headers, out, 'content-type')
     if (!out.has('content-type')) out.set('content-type', 'text/plain; charset=utf-8')
