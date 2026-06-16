@@ -195,6 +195,10 @@
   async function playIndex (i) {
     const track = currentResults[i]
     if (!track) return
+    // Cancel any auto-skip that was pending from a previous error —
+    // if the listener (or a real .ended event) picked a new track,
+    // the skip is no longer relevant.
+    clearTimeout(pendingSkipTimer)
     currentIndex = i
     Array.from(els.results.children).forEach((li, idx) => {
       li.classList.toggle('playing', idx === i)
@@ -384,16 +388,45 @@
     if (!('mediaSession' in navigator)) return
     try { navigator.mediaSession.playbackState = state } catch {}
   }
+
+  // Auto-skip-on-error: a single track 404 (Meting-API "VIP only" /
+  // "taken down", or upstream HTTP2 cut mid-stream) shouldn't stall
+  // the whole session — advance after a short pause so the listener
+  // notices the skip without it feeling jarring. Counter prevents an
+  // infinite skip loop when every track in the list is dead. Reset
+  // every time a track *actually* starts producing audio.
+  let consecutiveErrors = 0
+  let pendingSkipTimer = 0
+
   els.audio.addEventListener('play',     () => { setLoading(loadingState); setMediaPlaybackState('playing') })
   els.audio.addEventListener('pause',    () => { setLoading(loadingState); setMediaPlaybackState('paused') })
   els.audio.addEventListener('loadstart', () => setLoading(true))
   els.audio.addEventListener('waiting',   () => setLoading(true))
   els.audio.addEventListener('canplay',   () => setLoading(false))
-  els.audio.addEventListener('playing',   () => setLoading(false))
+  els.audio.addEventListener('playing',   () => {
+    setLoading(false)
+    consecutiveErrors = 0
+  })
   els.audio.addEventListener('error', () => {
     setLoading(false)
     setMediaPlaybackState('none')
-    if (els.audio.src) console.warn('[rmusic] audio error for', els.audio.currentSrc)
+    if (!els.audio.src) return
+    console.warn('[rmusic] audio error for', els.audio.currentSrc, 'code=', els.audio.error?.code)
+
+    consecutiveErrors += 1
+    // Single-loop is an explicit "stay on this track" — don't skip.
+    if (loopMode === 'single') {
+      els.nowAuthor.textContent = '本曲加载失败'
+      return
+    }
+    if (consecutiveErrors >= 3 || currentResults.length === 0) {
+      consecutiveErrors = 0
+      els.nowAuthor.textContent = '连续多曲不可播放,请换关键词'
+      return
+    }
+    els.nowAuthor.textContent = '本曲不可播放,跳到下一首…'
+    clearTimeout(pendingSkipTimer)
+    pendingSkipTimer = setTimeout(() => advance(1), 800)
   })
 
   /* ---------- Progress bar ---------- */
