@@ -162,6 +162,15 @@ body {
   display: inline-block;
   color: inherit;
   opacity: 0.55;
+  /* `white-space: pre` keeps the trailing space inside each
+   * `<span>` intact. Without it, every QRC word that owns a
+   * following space (`"Hello "`, `"it's "`, etc — that's how QQ
+   * Music encodes the gap between English words) gets that space
+   * eaten by the default `inline-block` whitespace-collapse rule,
+   * which jams all the words flush together (`"Helloit'sme"`).
+   * `pre` is the lightest possible fix — newlines inside a word
+   * are impossible because textContent never carries them. */
+  white-space: pre;
   /* Default transition is the "fade out" one — slow + smooth. The
    * .word-current rule below overrides with a faster lead-in. */
   transition:
@@ -529,8 +538,22 @@ body {
   .ctrl-btn { width: 34px; height: 34px; font-size: 13px; }
   .ctrl-btn.ctrl-play { width: 44px; height: 44px; font-size: 16px; }
   .container { bottom: 180px; top: 6%; }
-  .container li { padding: 0 12px; height: 44px; line-height: 44px; }
-  .container li.active { transform: scale(1.55); }
+  /* Sub-rows drive height now (a 2-sub group must measure 2x
+   * line-height); the outer <li> stays `height: auto` so
+   * cumulative-top math in client.js stays consistent. */
+  .container li { padding: 0 12px; }
+  .lrc-sub { height: 38px; line-height: 38px; }
+  .lrc-sub-secondary { height: 26px; line-height: 26px; }
+  /* Smaller active scale on phones — 1.55 sends long English
+   * lines off both edges of a 360-wide viewport even with
+   * `white-space: nowrap` allowing horizontal overflow. 1.28 keeps
+   * the karaoke pop visible without amputating the line. */
+  .container li.active { transform: scale(1.28); }
+  /* Long English lines should wrap on phone instead of running off
+   * the right edge — desktops have room to scroll the active line
+   * horizontally, phones do not. Per-word spans still drive the
+   * highlight; wrapping is purely a layout concern. */
+  .lrc-sub-primary { white-space: normal; }
 }
 
 @media (max-height: 480px) and (orientation: landscape) {
