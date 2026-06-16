@@ -238,14 +238,21 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(20, 20, 20, 0.55);
   color: #ddd;
-  font-size: 20px;
-  line-height: 1;
+  /* Flex-centre the inner SVG so the magnifier sits dead-centre
+   * regardless of how the browser renders any incidental text/font
+   * baseline math. (Buttons default to baseline-align inline
+   * content, which is how the previous `⌕` glyph ended up sitting
+   * low on Windows.) */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
   z-index: 1001;
 }
+#searchToggle svg { display: block; }
 #searchToggle:hover,
 #searchToggle:focus-visible {
   background: rgba(40, 40, 40, 0.75);
@@ -302,6 +309,24 @@ body {
   padding: 6px 8px;
   border-radius: 5px;
   font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* `color-scheme: dark` flips the form-control "skin" the browser
+   * uses for OS-native UI inside this element (the <select>
+   * dropdown popup, scrollbars, focus rings, etc). Without it, the
+   * Windows Chromium native dropdown defaults to a light-skinned
+   * popup and our `color: #eee` text comes out white-on-white. With
+   * it, the popup gets a dark background that matches our panel
+   * and the inherited text colour is legible. Safe everywhere —
+   * other platforms render dark form controls without any visible
+   * regression. */
+  color-scheme: dark;
+}
+/* Belt-and-braces: spell out the option background + colour anyway
+ * in case a future Chromium changes how aggressively `color-scheme`
+ * paints the popup. On Windows this is what makes the open
+ * dropdown unmistakably dark + readable. */
+.search-row select option {
+  background: #1a1a1a;
+  color: #eee;
 }
 .search-row select,
 .search-row input {

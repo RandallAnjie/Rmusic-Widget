@@ -21,7 +21,18 @@
   <!-- Top-right search toggle button. Sits alone (no more disc).
        Clicking opens the search panel. -->
   <button id="searchToggle" type="button" title="搜索 / 切换" aria-label="搜索">
-    <span aria-hidden="true">⌕</span>
+    <!-- Inline SVG magnifier. The U+2305 character we used to ship
+         renders fine on macOS/Linux but sits a noticeable few pixels
+         below the optical centre on Windows (Segoe UI Symbol's baseline
+         metric for that glyph is off). SVG dodges the font-rendering
+         lottery entirely — geometric, currentColor-aware, identical
+         everywhere. -->
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18"
+         fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="6.5"/>
+      <line x1="20" y1="20" x2="16" y2="16"/>
+    </svg>
   </button>
 
   <!-- Search panel — anchored top-right under the toggle button.
