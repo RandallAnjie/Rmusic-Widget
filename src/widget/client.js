@@ -206,7 +206,11 @@
     showNowPlaying(track)
     setBackdrop(track.pic)
     setLoading(true)
-    await loadLrc(track.lrc)
+    // Prefer the word-level URL when the search row exposed one.
+    // The server falls back to plain LRC on sources without word
+    // timing, so this URL always returns something parseLrc can
+    // render; clients without word support still get standard LRC.
+    await loadLrc(track.lrcpword || track.lrc)
     els.audio.src = track.url
     els.audio.play().catch(() => {
       // Browsers can refuse autoplay (first interaction not yet
@@ -523,6 +527,7 @@
 
   async function loadLrc (lrcUrl) {
     lrcData = []
+    _lastWordLineIdx = -1
     els.lrcList.innerHTML = ''
     delete els.lrcList.dataset.intro
     els.lrcList.style.transform = ''
@@ -536,21 +541,74 @@
     } catch { /* LRC missing is non-fatal */ }
   }
 
+  /* Parse LRC OR Enhanced LRC.
+   *
+   * Standard LRC:                 `[mm:ss.xx]words`
+   * Enhanced LRC (per-word):      `[mm:ss.xx]<mm:ss.xx>word1<mm:ss.xx>word2<mm:ss.xx>`
+   *
+   * Output normalised to a single shape so renderLrc doesn't care:
+   *
+   *   [{ time, words: [{ t, text }] }]
+   *
+   * Standard lines compress to a single-word entry. Word-level
+   * lines preserve the inline `<>` timing as one entry per word.
+   * The trailing `<>` marker (end-of-line) is dropped — we don't
+   * render a phantom empty word. */
+  /* Parse timestamp fragment (mm,ss,frac) into seconds. `frac` is
+   * the digit string after the dot — interpreted in its own base
+   * so `.1` = 0.1 s, `.11` = 0.11 s, `.111` = 0.111 s. Standard LRC
+   * spec is centiseconds (2 digits) but karaoke formats often emit
+   * milliseconds (3 digits) so we handle both. */
+  function lrcStampToSeconds (mm, ss, frac) {
+    const fracSec = frac ? parseInt(frac, 10) / Math.pow(10, frac.length) : 0
+    return parseInt(mm, 10) * 60 + parseInt(ss, 10) + fracSec
+  }
+
+  /* Parse LRC OR Enhanced LRC.
+   *
+   * Standard LRC:                 `[mm:ss.xx]words`
+   * Enhanced LRC (per-word):      `[mm:ss.xx]<mm:ss.xx>word1<mm:ss.xx>word2<mm:ss.xx>`
+   *
+   * Output normalised to a single shape so renderLrc doesn't care:
+   *
+   *   [{ time, words: [{ t, text }] }]
+   *
+   * Standard lines compress to a single-word entry. Word-level
+   * lines preserve the inline `<>` timing as one entry per word.
+   * The trailing `<>` marker (end-of-line) is dropped — we don't
+   * render a phantom empty word. */
   function parseLrc (text) {
     if (!text) return []
     const out = []
     text.split(/\r?\n/).forEach((line) => {
-      const ms = []
-      const re = /\[(\d+):(\d+)(?:\.(\d+))?\]/g
+      const headRe = /\[(\d+):(\d+)(?:\.(\d+))?\]/g
+      const heads = []
       let m
-      let lastIndex = 0
-      while ((m = re.exec(line)) !== null) {
-        ms.push(parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + (m[3] ? parseInt(m[3], 10) / 1000 : 0))
-        lastIndex = re.lastIndex
+      let bodyStart = 0
+      while ((m = headRe.exec(line)) !== null && m.index === bodyStart) {
+        heads.push(lrcStampToSeconds(m[1], m[2], m[3]))
+        bodyStart = headRe.lastIndex
       }
-      const words = line.slice(lastIndex).trim()
-      if (ms.length === 0) return
-      ms.forEach((t) => out.push({ time: t, words }))
+      if (heads.length === 0) return
+      const body = line.slice(bodyStart)
+      const wordRe = /<(\d+):(\d+)(?:\.(\d+))?>([^<]*)/g
+      const words = []
+      let lastIndex = 0
+      let wm
+      while ((wm = wordRe.exec(body)) !== null) {
+        const t = lrcStampToSeconds(wm[1], wm[2], wm[3])
+        const wtext = wm[4]
+        if (wtext !== '') words.push({ t, text: wtext })
+        lastIndex = wordRe.lastIndex
+      }
+      if (words.length > 0) {
+        heads.forEach((time) => out.push({ time, words: words.slice() }))
+        return
+      }
+      // Standard LRC fallback — wrap the line's text in a single
+      // "word" so rendering / highlight code doesn't have to branch.
+      const plain = body.slice(lastIndex).trim()
+      heads.forEach((time) => out.push({ time, words: [{ t: time, text: plain }] }))
     })
     out.sort((a, b) => a.time - b.time)
     return out
@@ -560,9 +618,29 @@
     const frag = document.createDocumentFragment()
     lrcData.forEach((row, i) => {
       const li = document.createElement('li')
-      li.textContent = row.words || '♪'
       li.dataset.time = String(row.time)
       li.dataset.index = String(i)
+      // Each word is its own <span> so the per-word highlight pass
+      // (setActiveWord, fires on timeupdate) can switch a single
+      // class. Single-word lines (standard LRC) get one span that
+      // covers the whole line — same code path.
+      if (row.words.length === 0 || (row.words.length === 1 && !row.words[0].text)) {
+        // Truly empty line — render a sentinel so the row doesn't
+        // collapse the LRC list's line-height math.
+        const sentinel = document.createElement('span')
+        sentinel.className = 'word'
+        sentinel.textContent = '♪'
+        li.appendChild(sentinel)
+      } else {
+        row.words.forEach((w, wi) => {
+          const span = document.createElement('span')
+          span.className = 'word'
+          span.dataset.t = String(w.t)
+          span.dataset.wi = String(wi)
+          span.textContent = w.text
+          li.appendChild(span)
+        })
+      }
       // No per-li click listener — taps are detected in
       // endLrcDrag's "didn't move" branch by reading e.target.
       // Avoids the double-seek that happens when browsers
@@ -572,6 +650,45 @@
     els.lrcList.appendChild(frag)
     requestAnimationFrame(setLrcOffset)
   }
+
+  /* Per-word highlight. Walks just the active line's spans, marks
+   * every word whose `t` is ≤ currentTime as "passed" and the
+   * latest one specifically as "current". When the active line
+   * itself changes we also clear the previous line's word classes,
+   * so seeking backwards through a song doesn't leave a trail of
+   * "passed" highlights on what's now a future line. */
+  let _lastWordLineIdx = -1
+  function setActiveWord () {
+    if (!lrcData.length) return
+    const idx = findLrcIndex()
+    if (idx < 0) return
+    if (_lastWordLineIdx >= 0 && _lastWordLineIdx !== idx) {
+      const oldLi = els.lrcList.children[_lastWordLineIdx]
+      if (oldLi) {
+        oldLi.querySelectorAll('.word-current, .word-passed').forEach((s) => {
+          s.classList.remove('word-current')
+          s.classList.remove('word-passed')
+        })
+      }
+    }
+    _lastWordLineIdx = idx
+    const li = els.lrcList.children[idx]
+    if (!li) return
+    const row = lrcData[idx]
+    if (!row || !row.words || row.words.length < 2) return
+    const t = els.audio.currentTime
+    const spans = li.querySelectorAll('.word')
+    let activeI = -1
+    for (let i = 0; i < row.words.length; i++) {
+      if (row.words[i].t <= t) activeI = i
+      else break
+    }
+    spans.forEach((s, i) => {
+      s.classList.toggle('word-passed', i < activeI)
+      s.classList.toggle('word-current', i === activeI)
+    })
+  }
+  els.audio.addEventListener('timeupdate', setActiveWord)
 
   function findLrcIndex () {
     if (!lrcData.length) return -1

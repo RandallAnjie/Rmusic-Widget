@@ -94,6 +94,37 @@ body {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
+/* Word-by-word highlight (Enhanced LRC).
+ *
+ *   .word             every span carved out of a line's lyrics
+ *   .word-passed      words whose start time is now in the past
+ *   .word-current     the word currently being sung — brightest
+ *
+ * Lines that came from line-only LRC render as a single span
+ * covering the whole line, so the per-word classes never get set
+ * and the line behaves identically to the pre-word-level
+ * implementation. */
+.word {
+  display: inline-block;
+  color: inherit;
+  opacity: 0.55;
+  transition: opacity 0.18s ease, color 0.18s ease, text-shadow 0.18s ease;
+}
+.container li.active .word { opacity: 0.7; }
+.container li.active .word.word-passed { opacity: 0.9; }
+.container li.active .word.word-current {
+  opacity: 1;
+  color: #fff;
+  text-shadow: 0 0 12px rgba(255, 255, 255, 0.55), 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+/* Non-active line(s) — kept dim. word classes still get set on the
+ * previously-active line as a song goes by, but the line itself is
+ * blurred so the contrast is barely perceptible — exactly the
+ * behaviour we want for "previously sung" lines visible in the
+ * scrolling tail. */
+.container li:not(.active) .word.word-current,
+.container li:not(.active) .word.word-passed { opacity: inherit; }
+
 /* Intro mode (no track loaded yet) — flex-center the static hint
  * lines instead of transform-scrolling them, and crisp them up. */
 .container ul[data-intro] {
