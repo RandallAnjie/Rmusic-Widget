@@ -98,24 +98,54 @@ body {
  *
  *   .word             every span carved out of a line's lyrics
  *   .word-passed      words whose start time is now in the past
- *   .word-current     the word currently being sung — brightest
+ *   .word-current     the word currently being sung — glowing, peak
  *
- * Lines that came from line-only LRC render as a single span
- * covering the whole line, so the per-word classes never get set
- * and the line behaves identically to the pre-word-level
- * implementation. */
+ * Visual rhythm tuned with the client.js WORD_LEAD_MS offset:
+ *
+ *   • word-current pops in with a short ~180 ms ease so the glow
+ *     is at peak by the time the syllable actually plays;
+ *   • word-current → word-passed uses a long 1.2 s ease so the
+ *     light fades gracefully behind the new current word rather
+ *     than snapping off.
+ *
+ * Lines that came from line-only LRC render as a single span so
+ * the per-word classes never get set and the line behaves like a
+ * normal LRC line. */
 .word {
   display: inline-block;
   color: inherit;
   opacity: 0.55;
-  transition: opacity 0.18s ease, color 0.18s ease, text-shadow 0.18s ease;
+  /* Default transition is the "fade out" one — slow + smooth. The
+   * .word-current rule below overrides with a faster lead-in. */
+  transition:
+    opacity 1.2s ease,
+    color 1.2s ease,
+    text-shadow 1.2s ease;
 }
 .container li.active .word { opacity: 0.7; }
-.container li.active .word.word-passed { opacity: 0.9; }
+.container li.active .word.word-passed {
+  /* Already-sung words keep a hint of warmth so the previously-
+   * lit cadence is still readable — but well below the current
+   * word so the eye tracks forward. */
+  opacity: 0.78;
+  color: rgba(235, 235, 235, 0.9);
+  text-shadow: 0 0 4px rgba(255, 255, 255, 0.2);
+}
 .container li.active .word.word-current {
   opacity: 1;
   color: #fff;
-  text-shadow: 0 0 12px rgba(255, 255, 255, 0.55), 0 1px 2px rgba(0, 0, 0, 0.55);
+  /* Layered shadow: a tight white glow for the core punch, a wider
+   * cool-blue halo for depth, plus a subtle drop shadow so the word
+   * stays legible against a bright backdrop. */
+  text-shadow:
+    0 0 6px rgba(255, 255, 255, 0.95),
+    0 0 14px rgba(180, 210, 255, 0.65),
+    0 0 24px rgba(120, 160, 220, 0.35),
+    0 1px 2px rgba(0, 0, 0, 0.55);
+  transition:
+    opacity 0.18s ease-out,
+    color 0.18s ease-out,
+    text-shadow 0.18s ease-out;
 }
 /* Non-active line(s) — kept dim. word classes still get set on the
  * previously-active line as a song goes by, but the line itself is

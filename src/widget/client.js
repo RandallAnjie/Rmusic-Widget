@@ -676,7 +676,14 @@
     if (!li) return
     const row = lrcData[idx]
     if (!row || !row.words || row.words.length < 2) return
-    const t = els.audio.currentTime
+    // Light a word *before* its nominal start so the highlight
+    // never lags behind what the listener is hearing — singers'
+    // word onsets are typically a fraction earlier than the LRC
+    // timestamp, and the CSS transition into `.word-current`
+    // takes another ~150 ms to peak. WORD_LEAD_MS compensates for
+    // both. Tweak in one spot rather than scattering offsets.
+    const WORD_LEAD_MS = 180
+    const t = els.audio.currentTime + WORD_LEAD_MS / 1000
     const spans = li.querySelectorAll('.word')
     let activeI = -1
     for (let i = 0; i < row.words.length; i++) {
