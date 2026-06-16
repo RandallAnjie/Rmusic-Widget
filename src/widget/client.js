@@ -215,7 +215,88 @@
   function showNowPlaying (track) {
     els.nowTitle.textContent = track.title || ''
     els.nowAuthor.textContent = track.author || ''
+    updateMediaSession(track)
   }
+
+  /* ---------- OS Media Session ----------
+   *
+   * Powers the macOS Now Playing widget, Windows media flyout,
+   * Android notification, AirPods + bluetooth headset buttons,
+   * iOS lock-screen artwork, etc. Without this the OS gets nothing
+   * and renders whatever fallback it has (often the page favicon
+   * + an unhelpful URL fragment). With this we get full title +
+   * artist + cover artwork + a working seek bar, plus the
+   * transport buttons on whatever surface the OS chose to expose.
+   *
+   * Feature-detected because non-secure contexts and old browsers
+   * lack the API; falling through is harmless. Each setActionHandler
+   * call is try/caught individually because some browsers (notably
+   * Safari < 16.4) throw on actions they don't support, and a single
+   * unsupported action shouldn't take out the rest.
+   */
+  function updateMediaSession (track) {
+    if (!('mediaSession' in navigator)) return
+    const meta = {
+      title: track.title || 'RMusic',
+      artist: track.author || '',
+      album: 'RMusic'
+    }
+    if (track.pic) {
+      // OS UIs prefer absolute URLs since they render the artwork
+      // in a context outside the page's URL base. The browser
+      // happily follows our 302 to the upstream cover CDN.
+      const absolute = new URL(track.pic, location.href).href
+      meta.artwork = [
+        { src: absolute, sizes: '300x300', type: 'image/jpeg' },
+        { src: absolute, sizes: '500x500', type: 'image/jpeg' }
+      ]
+    }
+    try { navigator.mediaSession.metadata = new MediaMetadata(meta) } catch {}
+    updateMediaPosition()
+  }
+
+  function updateMediaPosition () {
+    if (!('mediaSession' in navigator)) return
+    if (typeof navigator.mediaSession.setPositionState !== 'function') return
+    const d = els.audio.duration
+    if (!isFinite(d) || d <= 0) return
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: d,
+        playbackRate: els.audio.playbackRate || 1,
+        position: Math.min(d, Math.max(0, els.audio.currentTime || 0))
+      })
+    } catch {}
+  }
+
+  function setupMediaSessionActions () {
+    if (!('mediaSession' in navigator)) return
+    const ms = navigator.mediaSession
+    const safeSet = (name, fn) => { try { ms.setActionHandler(name, fn) } catch {} }
+    safeSet('play',          () => { if (els.audio.paused) els.audio.play().catch(() => {}) })
+    safeSet('pause',         () => { els.audio.pause() })
+    safeSet('previoustrack', () => advance(-1))
+    safeSet('nexttrack',     () => advance(1))
+    safeSet('stop',          () => { els.audio.pause(); els.audio.currentTime = 0 })
+    safeSet('seekto', (d) => {
+      if (typeof d.seekTime !== 'number') return
+      if (d.fastSeek && typeof els.audio.fastSeek === 'function') els.audio.fastSeek(d.seekTime)
+      else els.audio.currentTime = d.seekTime
+      updateMediaPosition()
+    })
+    safeSet('seekbackward', (d) => {
+      const off = d && d.seekOffset ? d.seekOffset : 10
+      els.audio.currentTime = Math.max(0, (els.audio.currentTime || 0) - off)
+      updateMediaPosition()
+    })
+    safeSet('seekforward', (d) => {
+      const off = d && d.seekOffset ? d.seekOffset : 10
+      const dur = els.audio.duration || Infinity
+      els.audio.currentTime = Math.min(dur, (els.audio.currentTime || 0) + off)
+      updateMediaPosition()
+    })
+  }
+  setupMediaSessionActions()
 
   function setBackdrop (picUrl) {
     if (!picUrl) {
@@ -299,14 +380,19 @@
 
   /* ---------- Audio events → UI ---------- */
 
-  els.audio.addEventListener('play',     () => setLoading(loadingState))
-  els.audio.addEventListener('pause',    () => setLoading(loadingState))
+  function setMediaPlaybackState (state) {
+    if (!('mediaSession' in navigator)) return
+    try { navigator.mediaSession.playbackState = state } catch {}
+  }
+  els.audio.addEventListener('play',     () => { setLoading(loadingState); setMediaPlaybackState('playing') })
+  els.audio.addEventListener('pause',    () => { setLoading(loadingState); setMediaPlaybackState('paused') })
   els.audio.addEventListener('loadstart', () => setLoading(true))
   els.audio.addEventListener('waiting',   () => setLoading(true))
   els.audio.addEventListener('canplay',   () => setLoading(false))
   els.audio.addEventListener('playing',   () => setLoading(false))
   els.audio.addEventListener('error', () => {
     setLoading(false)
+    setMediaPlaybackState('none')
     if (els.audio.src) console.warn('[rmusic] audio error for', els.audio.currentSrc)
   })
 
@@ -332,6 +418,20 @@
   }
   els.audio.addEventListener('timeupdate', updateProgress)
   els.audio.addEventListener('durationchange', updateProgress)
+  // Throttle position-state pushes — timeupdate fires ~4×/s in
+  // Chromium and the OS only needs occasional refreshes. Cheap
+  // setTimeout-debounce keeps the lock-screen scrubber in sync
+  // without spamming the API.
+  let positionPushTimer = 0
+  els.audio.addEventListener('timeupdate', () => {
+    if (positionPushTimer) return
+    positionPushTimer = setTimeout(() => {
+      positionPushTimer = 0
+      updateMediaPosition()
+    }, 800)
+  })
+  els.audio.addEventListener('durationchange', updateMediaPosition)
+  els.audio.addEventListener('ratechange', updateMediaPosition)
 
   function updateBuffered () {
     const d = els.audio.duration || 0
