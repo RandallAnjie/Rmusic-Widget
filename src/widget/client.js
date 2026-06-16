@@ -564,22 +564,36 @@
     return parseInt(mm, 10) * 60 + parseInt(ss, 10) + fracSec
   }
 
-  /* Parse LRC OR Enhanced LRC.
+  /* Parse LRC OR Enhanced LRC, then group co-timestamped subs.
    *
-   * Standard LRC:                 `[mm:ss.xx]words`
-   * Enhanced LRC (per-word):      `[mm:ss.xx]<mm:ss.xx>word1<mm:ss.xx>word2<mm:ss.xx>`
+   *   Standard LRC:            `[mm:ss.xx]words`
+   *   Enhanced LRC (per-word): `[mm:ss.xx]<mm:ss.xx>w1<mm:ss.xx>w2<mm:ss.xx>`
+   *   Translation merge from   Meting-API emits the translation on
+   *   its own line with the *same* `[mm:ss.xx]` head as the source
+   *   line — e.g. lyric-enhanced.js's mergeTranslation puts the
+   *   translation right after the source as
+   *   `[00:21.10](粉橙交织的天空…)`.
+   *   Duet / overlapping vocal lines also routinely share a
+   *   timestamp.
    *
-   * Output normalised to a single shape so renderLrc doesn't care:
+   * Output is a list of GROUPS — each group is a single semantic
+   * "line" the listener sees and tracks as one unit:
    *
-   *   [{ time, words: [{ t, text }] }]
+   *   [{
+   *     time,
+   *     subs: [ { words: [{ t, text }], wordLevel: bool } ]
+   *   }]
    *
-   * Standard lines compress to a single-word entry. Word-level
-   * lines preserve the inline `<>` timing as one entry per word.
-   * The trailing `<>` marker (end-of-line) is dropped — we don't
-   * render a phantom empty word. */
+   * Standard LRC subs compress to a single-word entry; word-level
+   * subs preserve the inline `<>` timestamps as one entry per word.
+   * `wordLevel` is true when the original LRC had more than one
+   * inline `<>` marker, so the renderer knows whether to expect
+   * per-word highlight on this sub. */
+  const GROUP_TOLERANCE_SEC = 0.05
+
   function parseLrc (text) {
     if (!text) return []
-    const out = []
+    const flat = []
     text.split(/\r?\n/).forEach((line) => {
       const headRe = /\[(\d+):(\d+)(?:\.(\d+))?\]/g
       const heads = []
@@ -602,45 +616,71 @@
         lastIndex = wordRe.lastIndex
       }
       if (words.length > 0) {
-        heads.forEach((time) => out.push({ time, words: words.slice() }))
+        heads.forEach((time) => flat.push({ time, words: words.slice(), wordLevel: words.length > 1 }))
         return
       }
       // Standard LRC fallback — wrap the line's text in a single
       // "word" so rendering / highlight code doesn't have to branch.
       const plain = body.slice(lastIndex).trim()
-      heads.forEach((time) => out.push({ time, words: [{ t: time, text: plain }] }))
+      heads.forEach((time) => flat.push({ time, words: [{ t: time, text: plain }], wordLevel: false }))
     })
-    out.sort((a, b) => a.time - b.time)
-    return out
+    flat.sort((a, b) => a.time - b.time)
+    // Group lines whose timestamps land within GROUP_TOLERANCE_SEC.
+    // The merged Enhanced LRC emits source + translation back to
+    // back at the same `[mm:ss.xx]`; duets routinely do the same.
+    // We treat each group as ONE row the listener sees + scrolls
+    // through. First sub in the group is the "primary" that owns
+    // the per-word highlight.
+    const groups = []
+    for (const line of flat) {
+      const last = groups[groups.length - 1]
+      if (last && Math.abs(line.time - last.time) <= GROUP_TOLERANCE_SEC) {
+        last.subs.push(line)
+      } else {
+        groups.push({ time: line.time, subs: [line] })
+      }
+    }
+    return groups
+  }
+
+  /** Pick the sub inside a group that should drive word-level
+   *  highlight. Prefer the first wordLevel sub; fall back to the
+   *  first sub for monolithic / line-only LRC. */
+  function primarySub (group) {
+    for (const s of group.subs) if (s.wordLevel) return s
+    return group.subs[0]
   }
 
   function renderLrc () {
     const frag = document.createDocumentFragment()
-    lrcData.forEach((row, i) => {
+    lrcData.forEach((group, i) => {
       const li = document.createElement('li')
-      li.dataset.time = String(row.time)
+      li.dataset.time = String(group.time)
       li.dataset.index = String(i)
-      // Each word is its own <span> so the per-word highlight pass
-      // (setActiveWord, fires on timeupdate) can switch a single
-      // class. Single-word lines (standard LRC) get one span that
-      // covers the whole line — same code path.
-      if (row.words.length === 0 || (row.words.length === 1 && !row.words[0].text)) {
-        // Truly empty line — render a sentinel so the row doesn't
-        // collapse the LRC list's line-height math.
-        const sentinel = document.createElement('span')
-        sentinel.className = 'word'
-        sentinel.textContent = '♪'
-        li.appendChild(sentinel)
-      } else {
-        row.words.forEach((w, wi) => {
-          const span = document.createElement('span')
-          span.className = 'word'
-          span.dataset.t = String(w.t)
-          span.dataset.wi = String(wi)
-          span.textContent = w.text
-          li.appendChild(span)
-        })
-      }
+      const primary = primarySub(group)
+      group.subs.forEach((sub) => {
+        const subDiv = document.createElement('div')
+        const isPrimary = sub === primary
+        subDiv.className = 'lrc-sub' + (isPrimary ? ' lrc-sub-primary' : ' lrc-sub-secondary')
+        if (sub.words.length === 0 || (sub.words.length === 1 && !sub.words[0].text)) {
+          // Truly empty sub — render a sentinel so the row doesn't
+          // collapse the LRC list's line-height math.
+          const sentinel = document.createElement('span')
+          sentinel.className = 'word'
+          sentinel.textContent = '♪'
+          subDiv.appendChild(sentinel)
+        } else {
+          sub.words.forEach((w, wi) => {
+            const span = document.createElement('span')
+            span.className = 'word'
+            span.dataset.t = String(w.t)
+            span.dataset.wi = String(wi)
+            span.textContent = w.text
+            subDiv.appendChild(span)
+          })
+        }
+        li.appendChild(subDiv)
+      })
       // No per-li click listener — taps are detected in
       // endLrcDrag's "didn't move" branch by reading e.target.
       // Avoids the double-seek that happens when browsers
@@ -674,8 +714,8 @@
     _lastWordLineIdx = idx
     const li = els.lrcList.children[idx]
     if (!li) return
-    const row = lrcData[idx]
-    if (!row || !row.words || row.words.length < 2) return
+    const group = lrcData[idx]
+    if (!group) return
     // Light a word *before* its nominal start so the highlight
     // never lags behind what the listener is hearing — singers'
     // word onsets are typically a fraction earlier than the LRC
@@ -684,10 +724,20 @@
     // both. Tweak in one spot rather than scattering offsets.
     const WORD_LEAD_MS = 180
     const t = els.audio.currentTime + WORD_LEAD_MS / 1000
-    const spans = li.querySelectorAll('.word')
+    // The group's primary sub owns the per-word highlight. Find
+    // its position in this <li>'s children so we can target only
+    // that sub-div's spans (translation / secondary sub spans
+    // stay neutral). For monolithic groups (single sub) this
+    // collapses to "the only sub".
+    const primary = primarySub(group)
+    if (!primary || primary.words.length < 2) return
+    const subIdx = group.subs.indexOf(primary)
+    const subDiv = li.children[subIdx]
+    if (!subDiv) return
+    const spans = subDiv.querySelectorAll('.word')
     let activeI = -1
-    for (let i = 0; i < row.words.length; i++) {
-      if (row.words[i].t <= t) activeI = i
+    for (let i = 0; i < primary.words.length; i++) {
+      if (primary.words[i].t <= t) activeI = i
       else break
     }
     spans.forEach((s, i) => {
@@ -706,6 +756,19 @@
     return lrcData.length - 1
   }
 
+  /** Cumulative top offset (from list start, unscaled px) for an
+   *  index — handles the new world where each row's height varies
+   *  with how many subs the group holds (single-line vs orig +
+   *  translation, etc). */
+  function rowTopAt (idx) {
+    let top = 0
+    for (let i = 0; i < idx; i++) {
+      const child = els.lrcList.children[i]
+      if (child) top += child.clientHeight
+    }
+    return top
+  }
+
   function setLrcOffset () {
     if (lrcDragging) return  // user is scrubbing; don't fight them
     if (!lrcData.length || !els.lrcList.children.length) return
@@ -713,9 +776,16 @@
     const idx = findLrcIndex()
     const container = els.lrcWrap
     const containerH = container.clientHeight
-    const liH = els.lrcList.children[0].clientHeight || 50
     const ulH = els.lrcList.clientHeight
-    let offset = containerH / 2 - liH * idx + liH / 2
+    let offset
+    if (idx < 0) {
+      offset = 0
+    } else {
+      const top = rowTopAt(idx)
+      const child = els.lrcList.children[idx]
+      const h = child ? child.clientHeight : 50
+      offset = containerH / 2 - top - h / 2
+    }
     const maxOffset = containerH - ulH
     if (offset < maxOffset) offset = maxOffset
     if (offset > 0) offset = 0
@@ -780,14 +850,28 @@
       }
       return
     }
-    // Drag-end: snap to whichever line is now closest to the centre
-    // of the container and seek there.
+    // Drag-end: walk variable-height rows from list top to find
+    // whichever row's centre is now closest to the container's
+    // centre. Uniform-height math is wrong now that a group with a
+    // translation sub is taller than a group with only the source.
     const containerH = els.lrcWrap.clientHeight
-    const liH = els.lrcList.children[0]?.clientHeight || 50
     const offset = currentTransformY()
-    // offset = containerH/2 - liH * idx + liH/2  →  solve for idx
-    const idx = Math.round((containerH / 2 - offset + liH / 2) / liH - 1)
-    const clamped = Math.max(0, Math.min(lrcData.length - 1, idx))
+    const centerY = containerH / 2 - offset  // world-y inside list
+    let bestIdx = -1
+    let bestDist = Infinity
+    let accumTop = 0
+    for (let i = 0; i < els.lrcList.children.length; i++) {
+      const child = els.lrcList.children[i]
+      const h = child.clientHeight
+      const center = accumTop + h / 2
+      const dist = Math.abs(center - centerY)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestIdx = i
+      }
+      accumTop += h
+    }
+    const clamped = Math.max(0, Math.min(lrcData.length - 1, bestIdx))
     const row = lrcData[clamped]
     if (row && isFinite(row.time)) {
       els.audio.currentTime = row.time

@@ -103,6 +103,44 @@ body {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
+/* Multi-sub group rows (original + translation, duet pairs, etc).
+ *
+ * Co-timestamped LRC lines are grouped client-side into ONE <li>
+ * with multiple <div class="lrc-sub"> children stacked. The whole
+ * group scrolls + scales + highlights as a unit; the primary sub
+ * (the word-level original) owns the per-word glow. Secondary subs
+ * (translation, harmony) render below at smaller scale + dimmer
+ * default so the eye still tracks the primary line's cadence
+ * without losing the auxiliary text.
+ *
+ * Single-sub groups (the common case) collapse to a single
+ * primary-styled block — visually indistinguishable from the
+ * pre-grouping renderer. */
+.container li {
+  /* Height auto so groups with two stacked subs measure correctly,
+   * but each individual sub stays at the fixed line-height for
+   * predictable per-sub geometry. */
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.lrc-sub {
+  display: block;
+  height: 50px;
+  line-height: 50px;
+}
+.lrc-sub-secondary {
+  font-size: 0.62em;
+  height: 32px;
+  line-height: 32px;
+  opacity: 0.6;
+  margin-top: 2px;
+}
+.container li.active .lrc-sub-secondary {
+  opacity: 0.85;
+}
+
 /* Word-by-word highlight (Enhanced LRC).
  *
  *   .word             every span carved out of a line's lyrics
