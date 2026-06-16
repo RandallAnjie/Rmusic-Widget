@@ -94,13 +94,24 @@ function rewriteTrackList (tracks, server) {
     const urlId = pickIdFromUrl(t.url)
     const picId = pickIdFromUrl(t.pic)
     const lrcId = pickIdFromUrl(t.lrc)
-    return {
+    // lrcpword is the optional word-level lyric URL Meting-API
+    // started emitting alongside lrc. We rewrite it the same way
+    // so the widget hits our /api/proxy?type=lrcpword path; sources
+    // without word-level data fall back to plain LRC server-side.
+    const lrcpwordId = pickIdFromUrl(t.lrcpword)
+    const out = {
       title: t.title,
       author: t.author,
       url: urlId ? publicProxyUrl(server, 'url', urlId) : t.url,
       pic: picId ? publicProxyUrl(server, 'pic', picId) : t.pic,
       lrc: lrcId ? publicProxyUrl(server, 'lrc', lrcId) : t.lrc
     }
+    if (lrcpwordId) {
+      out.lrcpword = publicProxyUrl(server, 'lrcpword', lrcpwordId)
+    } else if (t.lrcpword) {
+      out.lrcpword = t.lrcpword
+    }
+    return out
   })
 }
 
