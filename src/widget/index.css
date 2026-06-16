@@ -83,7 +83,16 @@ body {
   filter: blur(1px);
   transition: filter 0.6s ease, color 0.6s ease, transform 0.6s ease;
   white-space: nowrap;
-  overflow: hidden;
+  /* Was `overflow: hidden`, but that clipped the `.word-current`
+   * glow (~24 px halo) flat against the line's edges and the
+   * highlight lost its punch. The outer .container has
+   * `overflow: hidden` already, so long lines still get clipped
+   * at the player edge; this just lets each line's glow breathe
+   * vertically without escaping the player. Per spec, mixing
+   * overflow-x: hidden with overflow-y: visible silently promotes
+   * the visible to auto, so going fully visible is the only
+   * combo that leaves the halo intact. */
+  overflow: visible;
   padding: 0 24px;
   cursor: pointer;
 }
