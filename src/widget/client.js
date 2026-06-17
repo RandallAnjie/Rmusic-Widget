@@ -192,7 +192,7 @@
 
   /* ---------- Playback ---------- */
 
-  async function playIndex (i) {
+  function playIndex (i) {
     const track = currentResults[i]
     if (!track) return
     // Cancel any auto-skip that was pending from a previous error —
@@ -206,18 +206,35 @@
     showNowPlaying(track)
     setBackdrop(track.pic)
     setLoading(true)
-    // Prefer the word-level URL when the search row exposed one.
-    // The server falls back to plain LRC on sources without word
-    // timing, so this URL always returns something parseLrc can
-    // render; clients without word support still get standard LRC.
-    await loadLrc(track.lrcpword || track.lrc)
+    // CRITICAL: set audio.src + play() SYNCHRONOUSLY in the same task
+    // as the caller (especially the `ended` event handler). iOS Safari
+    // suspends a background tab the moment its audio element goes
+    // idle, and any awaited promise between `ended` and the new
+    // playback start breaks the chain — the next track silently
+    // fails to load and the listener sees the player freeze on lock
+    // screen. The pre-fix flow did `await loadLrc(...)` first, which
+    // pushed the audio.src assignment out by however long the lyric
+    // fetch took (~hundreds of ms to several seconds, easily long
+    // enough for iOS to declare the tab idle).
+    //
+    // Order:
+    //   1. audio.src / play()   — sync, keeps the media session alive
+    //   2. loadLrc(…)           — async, runs in parallel; missing
+    //                             lyric is non-fatal anyway
     els.audio.src = track.url
-    els.audio.play().catch(() => {
-      // Browsers can refuse autoplay (first interaction not yet
-      // performed) — the user can hit the play button to unblock.
-      setLoading(false)
-    })
+    const playPromise = els.audio.play()
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {
+        // Browsers can refuse autoplay (first interaction not yet
+        // performed) — the user can hit the play button to unblock.
+        setLoading(false)
+      })
+    }
     updateTransportEnabled()
+    // Prefer the word-level URL when the search row exposed one. The
+    // server falls back to plain LRC on sources without word timing,
+    // so this URL always returns something parseLrc can render.
+    loadLrc(track.lrcpword || track.lrc).catch(() => {})
   }
 
   function showNowPlaying (track) {
@@ -469,6 +486,46 @@
   })
   els.audio.addEventListener('durationchange', updateMediaPosition)
   els.audio.addEventListener('ratechange', updateMediaPosition)
+
+  /* ---------- Next-track pre-warm ----------
+   *
+   * iOS Safari's background tab killer pulls the rug fast: once
+   * the current audio element goes idle (i.e. between `ended` and
+   * the new `loadeddata`), the OS suspends the tab and the new
+   * track silently never starts. The `playIndex` reorder above
+   * keeps the audio element busy synchronously, but if the new
+   * URL takes a long time to first-byte (cold R2 cache + slow
+   * upstream resolution) the gap is still there.
+   *
+   * Mitigate by HEAD-prefetching the next track's audio URL when
+   * we're ≤8 s from the end of the current one. That nudges the
+   * Meting-API proxy worker to resolve the upstream URL and start
+   * populating R2 in the background, so the actual `src =
+   * next.url` 8 s later either hits R2 directly or arrives over a
+   * warm connection. Per-track latched so we don't re-fetch every
+   * timeupdate tick.
+   */
+  let _prewarmedTrackUrl = ''
+  els.audio.addEventListener('timeupdate', () => {
+    const d = els.audio.duration || 0
+    if (d <= 0 || currentResults.length <= 1 || currentIndex < 0) return
+    const remaining = d - (els.audio.currentTime || 0)
+    if (remaining > 8 || remaining < 0) return
+    // Pick the same index `ended` would pick — single/all/shuffle
+    // semantics already lived in the ended handler; we just mirror
+    // the "next sequential" rule here, which covers the common
+    // case. Shuffle picks something different at the time of
+    // `ended`, which is fine: at worst the pre-warm hit the wrong
+    // R2 key, no user-visible regression.
+    const nextIdx = (currentIndex + 1) % currentResults.length
+    const nextTrack = currentResults[nextIdx]
+    if (!nextTrack?.url || _prewarmedTrackUrl === nextTrack.url) return
+    _prewarmedTrackUrl = nextTrack.url
+    // HEAD so the Meting-API proxy worker resolves the upstream URL
+    // + tees the body into R2 (its handler kicks off the full-body
+    // fetch via ctx.waitUntil regardless of HEAD vs GET).
+    fetch(nextTrack.url, { method: 'HEAD' }).catch(() => {})
+  })
 
   function updateBuffered () {
     const d = els.audio.duration || 0
