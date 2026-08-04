@@ -8,7 +8,8 @@
   "private": true,
   "scripts": {
     "build": "node build.mjs",
-    "lint": "oxlint ."
+    "lint": "oxlint .",
+    "test": "npm run build && node test/smoke.mjs"
   },
   "dependencies": {
     "esbuild": "^0.24.0"
