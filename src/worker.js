@@ -34,6 +34,7 @@ const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, HEAD, OPTIONS',
   'access-control-allow-headers': 'Content-Type, Range',
+  'access-control-expose-headers': 'Content-Range, X-RateLimit-Limit, X-RateLimit-Remaining, X-RMusic-Fallback, X-RMusic-Original-Server',
   'access-control-max-age': '86400'
 }
 
@@ -137,7 +138,9 @@ async function route (request, env) {
       server: url.searchParams.get('server') || 'ytmusic',
       type: url.searchParams.get('type') || 'search',
       id: url.searchParams.get('id') ?? '',
-      r: url.searchParams.get('r') ?? undefined
+      r: url.searchParams.get('r') ?? undefined,
+      title: url.searchParams.get('title') ?? '',
+      author: url.searchParams.get('author') ?? ''
     }
     // Rewriting emits relative paths (`/api/proxy?...`) so the
     // browser resolves them against whatever origin the page itself

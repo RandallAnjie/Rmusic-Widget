@@ -45,5 +45,6 @@ RATE_MAX=180
 - `429 rate limit exceeded`：提高 `RATE_MAX`，或检查页面是否发生请求循环。
 - Meting-API 返回 401：两个 worker 的 token 不一致。
 - 封面或音频 404：对应平台可能没有该资源、歌曲下架或需要有效会员 cookie。
+- Tencent 返回 `vkey 全部 quality 都被拒`：通常是 QQ 音乐账号无对应权益、cookie 状态异常或 Worker 出口受地域限制。新版代理会严格匹配同曲后回退到网易云 / YouTube Music；响应头 `X-RMusic-Fallback` 表示实际采用的音源。仍返回 403 时应刷新 Tencent cookie、确认账号会员权益或调整 Meting-API 出口。
 
 浏览器看到的所有资源 URL 都应以本站 `/api/proxy` 开头；如果 Network 面板出现带 Meting `auth` 的跨域 URL，说明 JSON 重写逻辑出现回归。

@@ -14,6 +14,8 @@ const fixture = [{
   lrc: 'https://music.example/api?server=netease&type=lrc&id=lyric-1',
   lrcpword: 'https://music.example/api?server=netease&type=lrcpword&id=word-1&auth=old'
 }]
+const traditionalFixture = [{ ...fixture[0], title: '晴天', author: '周杰倫' }]
+const pollutedFixture = [{ ...fixture[0], title: 'Unsafe', author: 'Artist / DJ Foo' }]
 
 const env = {
   MUSIC_API_TOKEN: 'server-only-secret',
@@ -23,13 +25,19 @@ const env = {
       const url = new URL(input)
       calls.push({ url, init })
       const type = url.searchParams.get('type')
+      const server = url.searchParams.get('server')
       if (['search', 'playlist'].includes(type)) {
+        if (url.searchParams.get('id') === '晴天 周杰伦') return Response.json(traditionalFixture)
+        if (url.searchParams.get('id') === 'Unsafe Artist') return Response.json(pollutedFixture)
         return Response.json(fixture)
       }
       if (type === 'pic') {
         return new Response(null, { status: 302, headers: { location: 'https://img.example/cover.jpg' } })
       }
       if (type === 'url') {
+        if (server === 'tencent') {
+          return Response.json({ error: true, status: 403, message: 'vkey empty' }, { status: 403 })
+        }
         return new Response('audio', {
           status: init.headers.range ? 206 : 200,
           headers: {
@@ -91,6 +99,10 @@ assert.equal(track.lrc, '/api/proxy?server=netease&type=lrc&id=lyric-1')
 assert.equal(track.lrcpword, '/api/proxy?server=netease&type=lrcpword&id=word-1')
 assert.equal(calls.at(-1).url.searchParams.get('token'), 'server-only-secret')
 
+const tencentSearch = await request('/api/proxy?server=tencent&type=search&id=night')
+const [tencentTrack] = await tencentSearch.json()
+assert.equal(tencentTrack.url, '/api/proxy?server=tencent&type=url&id=audio-1&title=Night+Drive&author=RMusic')
+
 const lyrics = await request(track.lrcpword)
 assert.equal(lyrics.status, 200)
 assert.match(await lyrics.text(), /Night Drive/)
@@ -102,4 +114,35 @@ assert.equal(audio.status, 206)
 assert.equal(audio.headers.get('accept-ranges'), 'bytes')
 assert.equal(calls.at(-1).init.headers.range, 'bytes=0-4')
 
-console.log('smoke: app shell, metadata rewrite, lyrics and audio proxy passed')
+const recoveryCallStart = calls.length
+const recovered = await request('/api/proxy?server=tencent&type=url&id=blocked&title=Night+Drive&author=RMusic', { headers: { range: 'bytes=0-4' } })
+assert.equal(recovered.status, 206)
+assert.equal(recovered.headers.get('x-rmusic-fallback'), 'netease')
+assert.equal(recovered.headers.get('x-rmusic-original-server'), 'tencent')
+assert.match(recovered.headers.get('access-control-expose-headers'), /X-RMusic-Fallback/i)
+assert.equal(await recovered.text(), 'audio')
+const recoveryCalls = calls.slice(recoveryCallStart).map(({ url }) => [
+  url.searchParams.get('server'),
+  url.searchParams.get('type'),
+  url.searchParams.get('id')
+])
+assert.deepEqual(recoveryCalls, [
+  ['tencent', 'url', 'blocked'],
+  ['netease', 'search', 'Night Drive RMusic'],
+  ['netease', 'url', 'audio-1']
+])
+assert.ok(calls.slice(recoveryCallStart).every(({ url }) => url.searchParams.get('token') === 'server-only-secret'))
+
+const traditionalRecovery = await request('/api/proxy?server=tencent&type=url&id=blocked&title=%E6%99%B4%E5%A4%A9&author=%E5%91%A8%E6%9D%B0%E4%BC%A6')
+assert.equal(traditionalRecovery.status, 200)
+assert.equal(traditionalRecovery.headers.get('x-rmusic-fallback'), 'netease')
+
+const pollutedRecovery = await request('/api/proxy?server=tencent&type=url&id=blocked&title=Unsafe&author=Artist')
+assert.equal(pollutedRecovery.status, 403)
+assert.equal(pollutedRecovery.headers.get('x-rmusic-fallback'), null)
+
+const unrecoverable = await request('/api/proxy?server=tencent&type=url&id=blocked-without-metadata')
+assert.equal(unrecoverable.status, 403)
+assert.equal(unrecoverable.headers.get('cache-control'), 'no-store')
+
+console.log('smoke: app shell, metadata rewrite, lyrics, audio proxy and Tencent fallback passed')
