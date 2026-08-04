@@ -29,12 +29,11 @@ export function buildConfig (env) {
       token: env.MUSIC_API_TOKEN || ''
     },
     rate: {
-      // Sliding window per client IP. Defaults are tuned for a
-      // single human browsing the widget: a typical "open page,
-      // search a track, play, browse some more" session takes well
-      // under 60 requests/min even with auto-loaded search previews.
+      // The full-page app can load a visible grid of covers alongside
+      // search, lyrics and audio requests. Keep the limit protective
+      // against loops while leaving enough room for normal browsing.
       windowMs: toNumber(env.RATE_WINDOW_MS, 60_000),
-      max: toNumber(env.RATE_MAX, 60)
+      max: toNumber(env.RATE_MAX, 180)
     },
     log: {
       level: env.LOG_LEVEL || 'info'

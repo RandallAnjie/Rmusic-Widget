@@ -1,988 +1,1288 @@
-/* RMusic widget — client-side controller.
+/* RMusic full-page player.
  *
- * Layout in this revision:
- *   - top-right ⌕ button toggles the search panel
- *   - LRC fills the middle, scrolls with playback, and is also a
- *     seek surface (click a line / drag vertically)
- *   - bottom-center control bar carries the transport buttons,
- *     progress bar, shuffle and loop toggles, and the now-playing
- *     meta
- *
- * No more spinning disc, no more sub-section in the search panel
- * for playback modes — shuffle/loop live with the rest of the
- * transport at the bottom.
- *
- * Network: only same-origin /api/proxy. Worker injects the master
- * token and rate-limits.
+ * The browser only calls the same-origin /api/proxy surface. The
+ * worker injects MUSIC_API_TOKEN server-side and rewrites every
+ * resource URL, so playlists, covers, audio and lyrics never expose
+ * the Meting master token to the page.
  */
 
 (function () {
   'use strict'
 
   const $ = (id) => document.getElementById(id)
+  const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector))
+  const API = '/api/proxy'
 
   const els = {
-    audio:    $('audio'),
-    bg:       $('bg'),
-    lrcWrap:  $('lrc-container'),
-    lrcList:  $('lrc-list'),
-    searchToggle: $('searchToggle'),
-    panel:    $('search-panel'),
-    server:   $('server'),
-    query:    $('query'),
-    searchBtn: $('searchBtn'),
-    results:  $('results'),
-    status:   $('search-status'),
-    // bottom bar
+    app: $('app'),
+    audio: $('audio'),
+    ambient: $('ambient'),
+    searchForm: $('global-search'),
+    query: $('query'),
+    clearSearch: $('clearSearch'),
+    server: $('server'),
+    greeting: $('greeting'),
+    toast: $('toast'),
+    recentGrid: $('recent-grid'),
+    favoritePreview: $('favorite-preview'),
+    favoritePreviewSection: $('favorite-preview-section'),
+    searchTitle: $('search-title'),
+    searchSummary: $('search-summary'),
+    searchEmpty: $('search-empty'),
+    searchLoading: $('search-loading'),
+    searchResultsWrap: $('search-results-wrap'),
+    searchResults: $('search-results'),
+    searchCount: $('search-count'),
+    playSearchResults: $('playSearchResults'),
+    savedPlaylists: $('saved-playlists'),
+    sidebarPlaylists: $('sidebar-playlists'),
+    playlistCount: $('playlist-count'),
+    favoriteCount: $('favorite-count'),
+    favoriteTracks: $('favorite-tracks'),
+    recentTracks: $('recent-tracks'),
+    clearRecent: $('clearRecent'),
+    collectionCover: $('collection-cover'),
+    collectionKind: $('collection-kind'),
+    collectionTitle: $('collection-title'),
+    collectionDescription: $('collection-description'),
+    collectionCount: $('collection-count'),
+    collectionLoading: $('collection-loading'),
+    collectionTracks: $('collection-tracks'),
+    playCollection: $('playCollection'),
+    saveCollection: $('saveCollection'),
+    contextPanel: $('context-panel'),
+    closePanel: $('closePanel'),
+    queueNow: $('queue-now'),
+    queueCurrent: $('queue-current'),
+    queueList: $('queue-list'),
+    clearQueue: $('clearQueue'),
+    lyricsTitle: $('lyrics-title'),
+    lrcWrap: $('lrc-container'),
+    lrcList: $('lrc-list'),
+    nowCover: $('now-cover'),
+    nowCoverFallback: $('now-cover-fallback'),
     nowTitle: $('now-title'),
     nowAuthor: $('now-author'),
+    nowLike: $('now-like'),
+    shuffleBtn: $('shuffleBtn'),
+    prevBtn: $('prevBtn'),
+    playBtn: $('playBtn'),
+    playIcon: $('playIcon'),
+    nextBtn: $('nextBtn'),
+    loopBtn: $('loopBtn'),
+    repeatBadge: $('repeatBadge'),
     currTime: $('curr-time'),
     duration: $('duration'),
     progressBar: $('progress-bar'),
     progressFill: $('progress-fill'),
     progressBuffered: $('progress-buffered'),
     progressThumb: $('progress-thumb'),
-    playBtn:  $('playBtn'),
-    playIcon: $('playIcon'),
-    prevBtn:  $('prevBtn'),
-    nextBtn:  $('nextBtn'),
-    shuffleBtn: $('shuffleBtn'),
-    loopBtn:  $('loopBtn')
+    volume: $('volume'),
+    playlistModal: $('playlist-modal'),
+    closePlaylistModal: $('closePlaylistModal'),
+    playlistForm: $('playlist-form'),
+    playlistServer: $('playlist-server'),
+    playlistId: $('playlist-id'),
+    playlistName: $('playlist-name'),
+    playlistSave: $('playlist-save'),
+    playlistFormError: $('playlist-form-error'),
+    loadPlaylistButton: $('loadPlaylistButton')
   }
 
-  const API = '/api/proxy'
+  const STORAGE = {
+    source: 'rmusic_source_v2',
+    favorites: 'rmusic_favorites_v2',
+    recent: 'rmusic_recent_v2',
+    playlists: 'rmusic_playlists_v2',
+    modes: 'rmusic_playback_mode',
+    volume: 'rmusic_volume_v2'
+  }
 
-  let currentResults = []
-  let currentIndex = -1
+  const state = {
+    view: 'home',
+    searchResults: [],
+    collection: null,
+    queue: [],
+    queueIndex: -1,
+    queueLabel: '',
+    currentTrack: null,
+    favorites: readJson(STORAGE.favorites, []),
+    recent: readJson(STORAGE.recent, []),
+    playlists: readJson(STORAGE.playlists, []),
+    shuffle: 'off',
+    repeat: 'off',
+    openPanel: null,
+    loadingAudio: false,
+    consecutiveErrors: 0
+  }
+
+  let toastTimer = 0
+  let pendingSkipTimer = 0
+  let progressDragging = false
+  let prewarmedUrl = ''
   let lrcData = []
+  let lastLrcIndex = -1
+  let searchRequestId = 0
+  let collectionRequestId = 0
+  let lyricsRequestId = 0
 
-  /* ---------- Playback modes (shuffle + loop) ----------
-   *
-   * Same semantics as before; only UI placement changed.
-   *   shuffleMode: 'off' | 'on'
-   *   loopMode:    'off' | 'all' | 'single'
-   */
-  const STORAGE_KEY = 'rmusic_playback_mode'
-  let shuffleMode = 'off'
-  let loopMode = 'off'
-
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-    if (saved.shuffle === 'on' || saved.shuffle === 'off') shuffleMode = saved.shuffle
-    if (saved.loop === 'off' || saved.loop === 'all' || saved.loop === 'single') loopMode = saved.loop
-  } catch { /* private mode / quota */ }
-
-  function persistMode () {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ shuffle: shuffleMode, loop: loopMode })) } catch {}
-  }
-
-  function renderModes () {
-    // Null-guard every children-of-element lookup so a stale HTML
-    // shape doesn't crash the whole bootstrap. Iteration on this
-    // widget has rotated icon containers (`.mode-icon` → `.ctrl-
-    // icon`) at least once; CDN cache vs browser cache races have
-    // produced visitors with mismatched HTML / JS pairs that
-    // crashed at the first .querySelector(...).textContent.
-    if (els.shuffleBtn) {
-      els.shuffleBtn.dataset.mode = shuffleMode
-      const shuffleIcon = els.shuffleBtn.querySelector('.ctrl-icon')
-      if (shuffleIcon) shuffleIcon.textContent = shuffleMode === 'on' ? '⇄' : '→'
-    }
-    if (els.loopBtn) {
-      els.loopBtn.dataset.mode = loopMode
-      const icons = { off: '✗', all: '↻', single: '↺' }
-      const loopIcon = els.loopBtn.querySelector('.ctrl-icon')
-      if (loopIcon) loopIcon.textContent = icons[loopMode] || '✗'
+  function readJson (key, fallback) {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || 'null')
+      return parsed == null ? fallback : parsed
+    } catch {
+      return fallback
     }
   }
 
-  els.shuffleBtn.addEventListener('click', () => {
-    shuffleMode = shuffleMode === 'on' ? 'off' : 'on'
-    persistMode(); renderModes()
-  })
-  els.loopBtn.addEventListener('click', () => {
-    const cycle = { off: 'all', all: 'single', single: 'off' }
-    loopMode = cycle[loopMode] || 'off'
-    persistMode(); renderModes()
-  })
-  renderModes()
-
-  /* ---------- Search panel toggle ---------- */
-
-  function togglePanel (show) {
-    const willShow = typeof show === 'boolean' ? show : els.panel.hasAttribute('hidden')
-    if (willShow) {
-      els.panel.removeAttribute('hidden')
-      els.searchToggle.classList.add('active')
-      setTimeout(() => els.query.focus(), 0)
-    } else {
-      els.panel.setAttribute('hidden', '')
-      els.searchToggle.classList.remove('active')
-    }
+  function writeJson (key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)) } catch {}
   }
-  els.searchToggle.addEventListener('click', () => togglePanel())
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !els.panel.hasAttribute('hidden')) togglePanel(false)
-  })
+
+  function readStorage (key, fallback = '') {
+    try { return localStorage.getItem(key) ?? fallback } catch { return fallback }
+  }
+
+  function text (value, fallback = '') {
+    return typeof value === 'string' && value.trim() ? value.trim() : fallback
+  }
+
+  function trackKey (track) {
+    if (!track) return ''
+    return [track.server || '', track.id || '', track.url || '', track.title || '', track.author || ''].join('|')
+  }
+
+  function normalizeTrack (track, server) {
+    const out = { ...track }
+    out.server = track.server || server || els.server.value || 'netease'
+    out.title = text(track.title, '未知歌曲')
+    out.author = text(track.author, '未知艺人')
+    out.album = text(track.album, '')
+    out.url = text(track.url, '')
+    out.pic = text(track.pic, '')
+    out.lrc = text(track.lrc, '')
+    out.lrcpword = text(track.lrcpword, '')
+    if (typeof track.duration_ms !== 'number') out.duration_ms = null
+    return out
+  }
+
+  function normalizeList (list, server) {
+    if (!Array.isArray(list)) return []
+    return list.filter((item) => item && typeof item === 'object').map((item) => normalizeTrack(item, server))
+  }
+
+  function iconUse (svg, id) {
+    const use = svg && svg.querySelector('use')
+    if (use) use.setAttribute('href', '#' + id)
+  }
+
+  function createCover (track, className, eager = false) {
+    const wrap = document.createElement('div')
+    wrap.className = className
+    const fallback = document.createElement('span')
+    fallback.className = 'cover-fallback'
+    fallback.textContent = initials(track.title)
+    wrap.appendChild(fallback)
+    if (track.pic) {
+      const img = document.createElement('img')
+      img.alt = ''
+      img.loading = eager ? 'eager' : 'lazy'
+      img.src = track.pic
+      img.addEventListener('load', () => { fallback.hidden = true })
+      img.addEventListener('error', () => { img.remove(); fallback.hidden = false })
+      wrap.appendChild(img)
+    }
+    return wrap
+  }
+
+  function initials (value) {
+    const source = text(value, 'RM').replace(/[^\p{L}\p{N}]+/gu, '')
+    return source.slice(0, 2).toUpperCase() || 'RM'
+  }
+
+  function formatTime (seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '0:00'
+    const minutes = Math.floor(seconds / 60)
+    const rest = Math.floor(seconds % 60)
+    return minutes + ':' + String(rest).padStart(2, '0')
+  }
+
+  function durationLabel (track) {
+    return track.duration_ms ? formatTime(track.duration_ms / 1000) : '—'
+  }
+
+  function toast (message, kind) {
+    clearTimeout(toastTimer)
+    els.toast.textContent = message
+    els.toast.classList.toggle('error', kind === 'error')
+    els.toast.hidden = false
+    toastTimer = setTimeout(() => { els.toast.hidden = true }, 3200)
+  }
+
+  function apiErrorMessage (status, body) {
+    if (status === 429) return '请求太频繁，请稍后再试'
+    let parsed = null
+    try { parsed = JSON.parse(body) } catch {}
+    return parsed?.message || body.slice(0, 180) || ('请求失败 (' + status + ')')
+  }
+
+  async function fetchTracks (type, id, server) {
+    const params = new URLSearchParams({ server, type, id: String(id) })
+    const response = await fetch(API + '?' + params, { headers: { accept: 'application/json' } })
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      throw new Error(apiErrorMessage(response.status, body))
+    }
+    return normalizeList(await response.json(), server)
+  }
+
+  /* ---------- Navigation ---------- */
+
+  function showView (name) {
+    const target = name === 'collection' ? 'collection' : ['home', 'search', 'library'].includes(name) ? name : 'home'
+    state.view = target
+    $$('.view').forEach((view) => {
+      const active = view.dataset.view === target
+      view.hidden = !active
+      view.classList.toggle('active', active)
+    })
+    $$('[data-nav]').forEach((button) => button.classList.toggle('active', button.dataset.nav === target))
+    const scroll = document.querySelector('.content-scroll')
+    if (scroll) scroll.scrollTo({ top: 0, behavior: 'smooth' })
+    if (target === 'home') renderHome()
+    if (target === 'library') renderLibrary()
+    if (target === 'search') setTimeout(() => els.query.focus(), 80)
+  }
+
+  $$('[data-nav]').forEach((button) => button.addEventListener('click', () => showView(button.dataset.nav)))
+
+  function setGreeting () {
+    const hour = new Date().getHours()
+    els.greeting.textContent = hour < 6 ? '夜深了，听点轻的' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好'
+  }
 
   /* ---------- Search ---------- */
 
-  function setStatus (text, kind) {
-    if (!text) {
-      els.status.setAttribute('hidden', '')
-      els.status.textContent = ''
-      els.status.classList.remove('error')
+  async function runSearch (rawQuery) {
+    const query = text(rawQuery || els.query.value)
+    if (!query) {
+      showView('search')
+      toast('请输入歌曲、歌手或关键词')
       return
     }
-    els.status.removeAttribute('hidden')
-    els.status.textContent = text
-    els.status.classList.toggle('error', kind === 'error')
-  }
-
-  async function search () {
-    const query = els.query.value.trim()
-    if (!query) { setStatus('请输入关键词'); return }
-    const server = els.server.value || 'netease'
-    setStatus('搜索中…')
-    els.results.innerHTML = ''
+    els.query.value = query
+    els.clearSearch.hidden = false
+    showView('search')
+    els.searchTitle.textContent = '“' + query + '”'
+    els.searchSummary.textContent = '正在从 ' + selectedSourceLabel() + ' 搜索歌曲与艺人。'
+    els.searchEmpty.hidden = true
+    els.searchResultsWrap.hidden = true
+    els.searchLoading.hidden = false
+    const requestId = ++searchRequestId
     try {
-      const usp = new URLSearchParams({ server, type: 'search', id: query })
-      const res = await fetch(API + '?' + usp.toString(), { headers: { accept: 'application/json' } })
-      if (res.status === 429) {
-        setStatus('搜索太频繁,稍等再试 (' + (res.headers.get('retry-after') || '?') + 's)', 'error')
-        return
+      const results = await fetchTracks('search', query, els.server.value)
+      if (requestId !== searchRequestId) return
+      state.searchResults = results
+      renderTrackRows(els.searchResults, state.searchResults, '搜索：' + query)
+      els.searchCount.textContent = state.searchResults.length + ' 首歌曲'
+      els.searchSummary.textContent = state.searchResults.length
+        ? '来自 ' + selectedSourceLabel() + ' · 点击任意歌曲开始连续播放'
+        : '没有找到结果，试试更短的关键词或切换音源。'
+      els.searchResultsWrap.hidden = state.searchResults.length === 0
+      els.searchEmpty.hidden = state.searchResults.length !== 0
+      if (state.searchResults.length === 0) {
+        els.searchEmpty.querySelector('h2').textContent = '没有找到匹配歌曲'
+        els.searchEmpty.querySelector('p').textContent = '换个关键词，或者在右上角选择另一个音乐平台。'
       }
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '')
-        setStatus('上游错误 ' + res.status + (txt ? ': ' + txt.slice(0, 200) : ''), 'error')
-        return
-      }
-      const data = await res.json()
-      currentResults = Array.isArray(data) ? data : []
-      renderResults(currentResults)
-      setStatus(currentResults.length === 0 ? '无结果' : '共 ' + currentResults.length + ' 条')
-      updateTransportEnabled()
-    } catch (e) {
-      setStatus('请求失败: ' + (e && e.message ? e.message : e), 'error')
+    } catch (error) {
+      if (requestId !== searchRequestId) return
+      state.searchResults = []
+      els.searchEmpty.hidden = false
+      els.searchResultsWrap.hidden = true
+      els.searchEmpty.querySelector('h2').textContent = '搜索暂时不可用'
+      els.searchEmpty.querySelector('p').textContent = error.message
+      toast(error.message, 'error')
+    } finally {
+      if (requestId === searchRequestId) els.searchLoading.hidden = true
     }
   }
 
-  function renderResults (list) {
-    els.results.innerHTML = ''
-    const frag = document.createDocumentFragment()
-    list.forEach((t, i) => {
-      const li = document.createElement('li')
-      li.dataset.index = String(i)
-      const t1 = document.createElement('div')
-      t1.className = 'row-title'
-      t1.textContent = t.title || '(无标题)'
-      const t2 = document.createElement('div')
-      t2.className = 'row-author'
-      t2.textContent = t.author || ''
-      li.appendChild(t1)
-      li.appendChild(t2)
-      li.addEventListener('click', () => playIndex(i))
-      frag.appendChild(li)
-    })
-    els.results.appendChild(frag)
+  function selectedSourceLabel () {
+    return els.server.options[els.server.selectedIndex]?.textContent || els.server.value
   }
 
-  els.searchBtn.addEventListener('click', search)
-  els.query.addEventListener('keydown', (e) => { if (e.key === 'Enter') search() })
+  els.searchForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    runSearch()
+  })
+  els.query.addEventListener('input', () => { els.clearSearch.hidden = !els.query.value })
+  els.clearSearch.addEventListener('click', () => {
+    els.query.value = ''
+    els.clearSearch.hidden = true
+    els.query.focus()
+  })
+  els.server.addEventListener('change', () => {
+    try { localStorage.setItem(STORAGE.source, els.server.value) } catch {}
+    if (state.view === 'search' && els.query.value.trim()) runSearch()
+  })
+  $$('[data-discover]').forEach((button) => button.addEventListener('click', () => runSearch(button.dataset.discover)))
+  els.playSearchResults.addEventListener('click', () => playFromList(state.searchResults, 0, '搜索结果'))
 
-  /* ---------- Playback ---------- */
+  /* ---------- Track rendering ---------- */
 
-  function playIndex (i) {
-    const track = currentResults[i]
+  function renderTrackRows (container, tracks, contextLabel) {
+    container.innerHTML = ''
+    if (!tracks.length) {
+      const empty = document.createElement('div')
+      empty.className = 'library-empty'
+      empty.textContent = '这里还没有歌曲。'
+      container.appendChild(empty)
+      return
+    }
+    const fragment = document.createDocumentFragment()
+    tracks.forEach((track, index) => fragment.appendChild(createTrackRow(track, index, tracks, contextLabel)))
+    container.appendChild(fragment)
+    syncCurrentRows()
+    syncFavoriteButtons()
+  }
+
+  function createTrackRow (track, index, list, contextLabel) {
+    const row = document.createElement('div')
+    row.className = 'track-row'
+    row.dataset.trackKey = trackKey(track)
+
+    const number = document.createElement('div')
+    number.className = 'track-number'
+    const ordinal = document.createElement('span')
+    ordinal.textContent = String(index + 1)
+    const play = document.createElement('button')
+    play.type = 'button'
+    play.className = 'row-play'
+    play.setAttribute('aria-label', '播放 ' + track.title)
+    play.innerHTML = '<svg class="icon"><use href="#i-play"></use></svg>'
+    play.addEventListener('click', () => playFromList(list, index, contextLabel))
+    number.append(ordinal, play)
+
+    const main = document.createElement('div')
+    main.className = 'track-main'
+    main.appendChild(createCover(track, 'row-cover'))
+    const copy = document.createElement('div')
+    copy.className = 'track-copy'
+    const title = document.createElement('span')
+    title.className = 'track-title'
+    title.textContent = track.title
+    const author = document.createElement('span')
+    author.className = 'track-author'
+    author.textContent = track.author
+    copy.append(title, author)
+    main.appendChild(copy)
+    main.addEventListener('dblclick', () => playFromList(list, index, contextLabel))
+
+    const album = document.createElement('span')
+    album.className = 'track-album'
+    album.textContent = track.album || track.server || 'RMusic'
+
+    const like = document.createElement('button')
+    like.type = 'button'
+    like.className = 'icon-button row-action favorite-action'
+    like.dataset.trackKey = trackKey(track)
+    like.setAttribute('aria-label', '喜欢 ' + track.title)
+    like.innerHTML = '<svg class="icon"><use href="#i-heart"></use></svg>'
+    like.addEventListener('click', () => toggleFavorite(track))
+
+    const duration = document.createElement('span')
+    duration.className = 'track-duration'
+    duration.textContent = durationLabel(track)
+
+    row.append(number, main, album, like, duration)
+    return row
+  }
+
+  function renderCards (container, tracks) {
+    container.innerHTML = ''
+    if (!tracks.length) {
+      const empty = document.createElement('div')
+      empty.className = 'library-empty'
+      empty.textContent = '播放一些歌曲后，这里会自动出现。'
+      container.appendChild(empty)
+      return
+    }
+    tracks.slice(0, 8).forEach((track, index) => {
+      const card = document.createElement('article')
+      card.className = 'music-card'
+      card.tabIndex = 0
+      const cover = createCover(track, 'card-cover')
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'card-play'
+      button.setAttribute('aria-label', '播放 ' + track.title)
+      button.innerHTML = '<svg class="icon"><use href="#i-play"></use></svg>'
+      button.addEventListener('click', (event) => { event.stopPropagation(); playFromList(tracks, index, '最近播放') })
+      cover.appendChild(button)
+      const title = document.createElement('strong')
+      title.textContent = track.title
+      const author = document.createElement('span')
+      author.textContent = track.author
+      card.append(cover, title, author)
+      card.addEventListener('click', () => playFromList(tracks, index, '最近播放'))
+      card.addEventListener('keydown', (event) => { if (event.key === 'Enter') playFromList(tracks, index, '最近播放') })
+      container.appendChild(card)
+    })
+  }
+
+  /* ---------- Favorites, recent and library ---------- */
+
+  function isFavorite (track) {
+    const key = trackKey(track)
+    return state.favorites.some((item) => trackKey(item) === key)
+  }
+
+  function toggleFavorite (track) {
+    const key = trackKey(track)
+    const index = state.favorites.findIndex((item) => trackKey(item) === key)
+    if (index >= 0) {
+      state.favorites.splice(index, 1)
+      toast('已从喜欢的歌曲中移除')
+    } else {
+      state.favorites.unshift(normalizeTrack(track, track.server))
+      state.favorites = state.favorites.slice(0, 200)
+      toast('已添加到喜欢的歌曲')
+    }
+    writeJson(STORAGE.favorites, state.favorites)
+    renderHome()
+    renderLibrary()
+    syncFavoriteButtons()
+  }
+
+  function syncFavoriteButtons () {
+    $$('.favorite-action').forEach((button) => {
+      const liked = state.favorites.some((item) => trackKey(item) === button.dataset.trackKey)
+      button.classList.toggle('liked', liked)
+      button.title = liked ? '取消喜欢' : '添加到喜欢'
+    })
+    const currentLiked = state.currentTrack && isFavorite(state.currentTrack)
+    els.nowLike.classList.toggle('liked', !!currentLiked)
+    els.nowLike.title = currentLiked ? '取消喜欢' : '添加到喜欢'
+  }
+
+  function addRecent (track) {
+    const key = trackKey(track)
+    state.recent = [normalizeTrack(track, track.server), ...state.recent.filter((item) => trackKey(item) !== key)].slice(0, 30)
+    writeJson(STORAGE.recent, state.recent)
+    renderHome()
+  }
+
+  function renderHome () {
+    renderCards(els.recentGrid, state.recent)
+    els.favoritePreviewSection.hidden = state.favorites.length === 0
+    renderTrackRows(els.favoritePreview, state.favorites.slice(0, 5), '喜欢的歌曲')
+  }
+
+  function renderLibrary () {
+    renderSavedPlaylists()
+    els.playlistCount.textContent = state.playlists.length ? state.playlists.length + ' 个歌单' : '还没有保存歌单'
+    els.favoriteCount.textContent = state.favorites.length + ' 首歌曲'
+    renderTrackRows(els.favoriteTracks, state.favorites, '喜欢的歌曲')
+    renderTrackRows(els.recentTracks, state.recent, '最近播放')
+  }
+
+  els.nowLike.addEventListener('click', () => { if (state.currentTrack) toggleFavorite(state.currentTrack) })
+  els.clearRecent.addEventListener('click', () => {
+    state.recent = []
+    writeJson(STORAGE.recent, state.recent)
+    renderHome()
+    renderLibrary()
+    toast('最近播放已清空')
+  })
+
+  /* ---------- Playlists ---------- */
+
+  function playlistKey (playlist) { return playlist.server + ':' + playlist.id }
+
+  function openPlaylistModal () {
+    els.playlistModal.hidden = false
+    els.playlistServer.value = els.server.value
+    els.playlistFormError.hidden = true
+    setTimeout(() => els.playlistId.focus(), 40)
+  }
+
+  function closePlaylistModal () {
+    els.playlistModal.hidden = true
+    els.playlistFormError.hidden = true
+  }
+
+  $('openPlaylistModal').addEventListener('click', openPlaylistModal)
+  $('heroPlaylistButton').addEventListener('click', openPlaylistModal)
+  $('libraryAddPlaylist').addEventListener('click', openPlaylistModal)
+  els.closePlaylistModal.addEventListener('click', closePlaylistModal)
+  els.playlistModal.addEventListener('click', (event) => { if (event.target === els.playlistModal) closePlaylistModal() })
+
+  els.playlistForm.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const playlist = {
+      server: els.playlistServer.value,
+      id: els.playlistId.value.trim(),
+      name: els.playlistName.value.trim() || '歌单 ' + els.playlistId.value.trim()
+    }
+    if (!playlist.id) return
+    els.loadPlaylistButton.disabled = true
+    els.loadPlaylistButton.textContent = '载入中…'
+    els.playlistFormError.hidden = true
+    try {
+      const shouldSave = els.playlistSave.checked
+      closePlaylistModal()
+      const loaded = await loadPlaylist(playlist)
+      if (loaded && shouldSave) {
+        savePlaylistDefinition(playlist)
+        renderLibrary()
+        syncCollectionSaveButton()
+        toast('歌单已保存到音乐库')
+      }
+      els.playlistForm.reset()
+      els.playlistSave.checked = true
+    } catch (error) {
+      els.playlistModal.hidden = false
+      els.playlistFormError.textContent = error.message
+      els.playlistFormError.hidden = false
+    } finally {
+      els.loadPlaylistButton.disabled = false
+      els.loadPlaylistButton.textContent = '载入歌单'
+    }
+  })
+
+  function savePlaylistDefinition (playlist) {
+    const value = { server: playlist.server, id: String(playlist.id), name: playlist.name || ('歌单 ' + playlist.id), savedAt: Date.now() }
+    state.playlists = [value, ...state.playlists.filter((item) => playlistKey(item) !== playlistKey(value))].slice(0, 60)
+    writeJson(STORAGE.playlists, state.playlists)
+    renderSavedPlaylists()
+  }
+
+  function removePlaylistDefinition (playlist) {
+    state.playlists = state.playlists.filter((item) => playlistKey(item) !== playlistKey(playlist))
+    writeJson(STORAGE.playlists, state.playlists)
+    renderSavedPlaylists()
+    renderLibrary()
+    syncCollectionSaveButton()
+    toast('歌单已从音乐库移除')
+  }
+
+  function renderSavedPlaylists () {
+    els.savedPlaylists.innerHTML = ''
+    els.sidebarPlaylists.innerHTML = ''
+    if (!state.playlists.length) {
+      const sidebarEmpty = document.createElement('div')
+      sidebarEmpty.className = 'sidebar-empty'
+      sidebarEmpty.textContent = '点击 +，通过平台歌单 ID 添加。'
+      els.sidebarPlaylists.appendChild(sidebarEmpty)
+      const empty = document.createElement('div')
+      empty.className = 'library-empty'
+      empty.textContent = '还没有歌单。点击“添加歌单”，把网易云、QQ 音乐等平台的歌单放进来。'
+      els.savedPlaylists.appendChild(empty)
+      return
+    }
+    state.playlists.forEach((playlist) => {
+      const side = document.createElement('button')
+      side.type = 'button'
+      side.className = 'sidebar-playlist'
+      side.textContent = playlist.name
+      side.title = playlist.name + ' · ' + playlist.server
+      side.addEventListener('click', () => loadPlaylist(playlist).catch((error) => toast(error.message, 'error')))
+      els.sidebarPlaylists.appendChild(side)
+
+      const card = document.createElement('article')
+      card.className = 'playlist-card'
+      card.tabIndex = 0
+      const art = document.createElement('div')
+      art.className = 'playlist-art'
+      art.textContent = initials(playlist.name)
+      const copy = document.createElement('div')
+      copy.className = 'playlist-copy'
+      const name = document.createElement('strong')
+      name.textContent = playlist.name
+      const meta = document.createElement('span')
+      meta.textContent = sourceName(playlist.server) + ' · 在线歌单'
+      copy.append(name, meta)
+      const remove = document.createElement('button')
+      remove.type = 'button'
+      remove.className = 'icon-button playlist-remove'
+      remove.title = '移除歌单'
+      remove.innerHTML = '<svg class="icon"><use href="#i-close"></use></svg>'
+      remove.addEventListener('click', (event) => { event.stopPropagation(); removePlaylistDefinition(playlist) })
+      card.append(art, copy, remove)
+      card.addEventListener('click', () => loadPlaylist(playlist).catch((error) => toast(error.message, 'error')))
+      card.addEventListener('keydown', (event) => { if (event.key === 'Enter') loadPlaylist(playlist).catch((error) => toast(error.message, 'error')) })
+      els.savedPlaylists.appendChild(card)
+    })
+  }
+
+  function sourceName (server) {
+    const labels = { netease: '网易云', tencent: 'QQ 音乐', ytmusic: 'YouTube Music', kugou: '酷狗', kuwo: '酷我', baidu: '百度', spotify: 'Spotify', apple: 'Apple Music' }
+    return labels[server] || server
+  }
+
+  async function loadPlaylist (playlist) {
+    const requestId = ++collectionRequestId
+    const collection = { ...playlist, tracks: [] }
+    state.collection = collection
+    showView('collection')
+    renderCollectionHeader()
+    els.collectionLoading.hidden = false
+    els.collectionTracks.innerHTML = ''
+    try {
+      const tracks = await fetchTracks('playlist', playlist.id, playlist.server)
+      if (requestId !== collectionRequestId) return false
+      collection.tracks = tracks
+      renderCollectionHeader()
+      renderTrackRows(els.collectionTracks, tracks, playlist.name)
+      if (!tracks.length) toast('歌单没有返回曲目', 'error')
+      return true
+    } catch (error) {
+      if (requestId !== collectionRequestId) return false
+      const empty = document.createElement('div')
+      empty.className = 'library-empty'
+      empty.textContent = error.message
+      els.collectionTracks.appendChild(empty)
+      throw error
+    } finally {
+      if (requestId === collectionRequestId) els.collectionLoading.hidden = true
+    }
+  }
+
+  function renderCollectionHeader () {
+    const collection = state.collection
+    if (!collection) return
+    els.collectionKind.textContent = sourceName(collection.server) + ' 歌单'
+    els.collectionTitle.textContent = collection.name || ('歌单 ' + collection.id)
+    els.collectionDescription.textContent = '来自 ' + sourceName(collection.server) + ' · 在线获取最新曲目'
+    els.collectionCount.textContent = collection.tracks.length ? collection.tracks.length + ' 首歌曲' : '正在载入曲目'
+    els.collectionCover.innerHTML = ''
+    if (collection.tracks[0]?.pic) {
+      const image = document.createElement('img')
+      image.src = collection.tracks[0].pic
+      image.alt = ''
+      image.addEventListener('error', () => { image.remove(); els.collectionCover.textContent = initials(collection.name) })
+      els.collectionCover.appendChild(image)
+    } else {
+      els.collectionCover.textContent = initials(collection.name)
+    }
+    syncCollectionSaveButton()
+  }
+
+  function syncCollectionSaveButton () {
+    const collection = state.collection
+    const saved = !!collection && state.playlists.some((item) => playlistKey(item) === playlistKey(collection))
+    els.saveCollection.classList.toggle('saved', saved)
+    els.saveCollection.title = saved ? '从音乐库移除' : '保存到音乐库'
+  }
+
+  els.playCollection.addEventListener('click', () => {
+    if (state.collection?.tracks.length) playFromList(state.collection.tracks, 0, state.collection.name)
+  })
+  els.saveCollection.addEventListener('click', () => {
+    if (!state.collection) return
+    const saved = state.playlists.some((item) => playlistKey(item) === playlistKey(state.collection))
+    if (saved) removePlaylistDefinition(state.collection)
+    else {
+      savePlaylistDefinition(state.collection)
+      renderLibrary()
+      syncCollectionSaveButton()
+      toast('歌单已保存到音乐库')
+    }
+  })
+
+  /* ---------- Queue and playback ---------- */
+
+  function playFromList (tracks, index, label) {
+    if (!tracks.length || !tracks[index]) return
+    state.queue = tracks.slice()
+    state.queueIndex = index
+    state.queueLabel = label || '播放队列'
+    playQueueIndex(index)
+  }
+
+  function playQueueIndex (index) {
+    const track = state.queue[index]
     if (!track) return
-    // Cancel any auto-skip that was pending from a previous error —
-    // if the listener (or a real .ended event) picked a new track,
-    // the skip is no longer relevant.
     clearTimeout(pendingSkipTimer)
-    currentIndex = i
-    Array.from(els.results.children).forEach((li, idx) => {
-      li.classList.toggle('playing', idx === i)
-    })
-    showNowPlaying(track)
-    setBackdrop(track.pic)
-    setLoading(true)
-    // CRITICAL: set audio.src + play() SYNCHRONOUSLY in the same task
-    // as the caller (especially the `ended` event handler). iOS Safari
-    // suspends a background tab the moment its audio element goes
-    // idle, and any awaited promise between `ended` and the new
-    // playback start breaks the chain — the next track silently
-    // fails to load and the listener sees the player freeze on lock
-    // screen. The pre-fix flow did `await loadLrc(...)` first, which
-    // pushed the audio.src assignment out by however long the lyric
-    // fetch took (~hundreds of ms to several seconds, easily long
-    // enough for iOS to declare the tab idle).
-    //
-    // Order:
-    //   1. audio.src / play()   — sync, keeps the media session alive
-    //   2. loadLrc(…)           — async, runs in parallel; missing
-    //                             lyric is non-fatal anyway
-    els.audio.src = track.url
-    const playPromise = els.audio.play()
-    if (playPromise && typeof playPromise.catch === 'function') {
-      playPromise.catch(() => {
-        // Browsers can refuse autoplay (first interaction not yet
-        // performed) — the user can hit the play button to unblock.
-        setLoading(false)
-      })
-    }
+    state.queueIndex = index
+    state.currentTrack = track
+    prewarmedUrl = ''
+    updateNowPlaying(track)
+    renderQueue()
+    syncCurrentRows()
     updateTransportEnabled()
-    // Prefer the word-level URL when the search row exposed one. The
-    // server falls back to plain LRC on sources without word timing,
-    // so this URL always returns something parseLrc can render.
-    loadLrc(track.lrcpword || track.lrc).catch(() => {})
+    setLoading(true)
+
+    if (!track.url) {
+      setLoading(false)
+      state.consecutiveErrors += 1
+      if (state.consecutiveErrors >= 3) {
+        state.consecutiveErrors = 0
+        toast('连续多首歌曲没有可用地址，请切换音源', 'error')
+      } else {
+        toast('当前歌曲没有可用地址，正在跳到下一首', 'error')
+        pendingSkipTimer = setTimeout(() => advance(1), 850)
+      }
+      return
+    }
+
+    // Keep audio.src + play() synchronous. iOS can suspend a
+    // background tab in the await gap between tracks.
+    els.audio.src = track.url
+    const promise = els.audio.play()
+    if (promise && typeof promise.catch === 'function') promise.catch(() => setLoading(false))
+
+    addRecent(track)
+    loadLyrics(track)
   }
 
-  function showNowPlaying (track) {
-    els.nowTitle.textContent = track.title || ''
-    els.nowAuthor.textContent = track.author || ''
+  function updateNowPlaying (track) {
+    els.nowTitle.textContent = track.title
+    els.nowAuthor.textContent = track.author
+    els.lyricsTitle.textContent = track.title
+    els.nowLike.disabled = false
+    els.nowCoverFallback.textContent = initials(track.title)
+    els.nowCoverFallback.hidden = false
+    if (track.pic) {
+      els.nowCover.hidden = false
+      els.nowCover.src = track.pic
+      els.nowCover.addEventListener('load', () => { els.nowCoverFallback.hidden = true }, { once: true })
+      els.nowCover.addEventListener('error', () => { els.nowCover.hidden = true; els.nowCoverFallback.hidden = false }, { once: true })
+      els.ambient.style.backgroundImage = "url('" + track.pic.replace(/'/g, '%27') + "')"
+      els.ambient.style.opacity = '.42'
+    } else {
+      els.nowCover.hidden = true
+      els.ambient.style.backgroundImage = ''
+      els.ambient.style.opacity = '.78'
+    }
+    syncFavoriteButtons()
     updateMediaSession(track)
   }
 
-  /* ---------- OS Media Session ----------
-   *
-   * Powers the macOS Now Playing widget, Windows media flyout,
-   * Android notification, AirPods + bluetooth headset buttons,
-   * iOS lock-screen artwork, etc. Without this the OS gets nothing
-   * and renders whatever fallback it has (often the page favicon
-   * + an unhelpful URL fragment). With this we get full title +
-   * artist + cover artwork + a working seek bar, plus the
-   * transport buttons on whatever surface the OS chose to expose.
-   *
-   * Feature-detected because non-secure contexts and old browsers
-   * lack the API; falling through is harmless. Each setActionHandler
-   * call is try/caught individually because some browsers (notably
-   * Safari < 16.4) throw on actions they don't support, and a single
-   * unsupported action shouldn't take out the rest.
-   */
-  function updateMediaSession (track) {
-    if (!('mediaSession' in navigator)) return
-    const meta = {
-      title: track.title || 'RMusic',
-      artist: track.author || '',
-      album: 'RMusic'
-    }
-    if (track.pic) {
-      // OS UIs prefer absolute URLs since they render the artwork
-      // in a context outside the page's URL base. The browser
-      // happily follows our 302 to the upstream cover CDN.
-      const absolute = new URL(track.pic, location.href).href
-      meta.artwork = [
-        { src: absolute, sizes: '300x300', type: 'image/jpeg' },
-        { src: absolute, sizes: '500x500', type: 'image/jpeg' }
-      ]
-    }
-    try { navigator.mediaSession.metadata = new MediaMetadata(meta) } catch {}
-    updateMediaPosition()
-  }
-
-  function updateMediaPosition () {
-    if (!('mediaSession' in navigator)) return
-    if (typeof navigator.mediaSession.setPositionState !== 'function') return
-    const d = els.audio.duration
-    if (!isFinite(d) || d <= 0) return
-    try {
-      navigator.mediaSession.setPositionState({
-        duration: d,
-        playbackRate: els.audio.playbackRate || 1,
-        position: Math.min(d, Math.max(0, els.audio.currentTime || 0))
-      })
-    } catch {}
-  }
-
-  function setupMediaSessionActions () {
-    if (!('mediaSession' in navigator)) return
-    const ms = navigator.mediaSession
-    const safeSet = (name, fn) => { try { ms.setActionHandler(name, fn) } catch {} }
-    safeSet('play',          () => { if (els.audio.paused) els.audio.play().catch(() => {}) })
-    safeSet('pause',         () => { els.audio.pause() })
-    safeSet('previoustrack', () => advance(-1))
-    safeSet('nexttrack',     () => advance(1))
-    safeSet('stop',          () => { els.audio.pause(); els.audio.currentTime = 0 })
-    safeSet('seekto', (d) => {
-      if (typeof d.seekTime !== 'number') return
-      if (d.fastSeek && typeof els.audio.fastSeek === 'function') els.audio.fastSeek(d.seekTime)
-      else els.audio.currentTime = d.seekTime
-      updateMediaPosition()
-    })
-    safeSet('seekbackward', (d) => {
-      const off = d && d.seekOffset ? d.seekOffset : 10
-      els.audio.currentTime = Math.max(0, (els.audio.currentTime || 0) - off)
-      updateMediaPosition()
-    })
-    safeSet('seekforward', (d) => {
-      const off = d && d.seekOffset ? d.seekOffset : 10
-      const dur = els.audio.duration || Infinity
-      els.audio.currentTime = Math.min(dur, (els.audio.currentTime || 0) + off)
-      updateMediaPosition()
-    })
-  }
-  setupMediaSessionActions()
-
-  function setBackdrop (picUrl) {
-    if (!picUrl) {
-      els.bg.style.backgroundImage = ''
-      return
-    }
-    els.bg.style.backgroundImage = "url('" + picUrl.replace(/'/g, "%27") + "')"
-  }
-
   function updateTransportEnabled () {
-    const hasList = currentResults.length > 0
-    const hasTrack = currentIndex >= 0
-    els.prevBtn.disabled = !hasList
-    els.nextBtn.disabled = !hasList
-    els.playBtn.disabled = !hasTrack && !hasList
-  }
-  updateTransportEnabled()
-
-  /* ---------- Loading indicator ---------- */
-
-  let loadingState = false
-  function setLoading (on) {
-    loadingState = !!on
-    els.playBtn.classList.toggle('loading', loadingState)
-    if (loadingState) els.playIcon.textContent = ''
-    else els.playIcon.textContent = els.audio.paused ? '▶' : '⏸'
+    const hasQueue = state.queue.length > 0
+    els.prevBtn.disabled = !hasQueue
+    els.nextBtn.disabled = !hasQueue
+    els.playBtn.disabled = !hasQueue
   }
 
-  /* ---------- Transport ---------- */
+  function setLoading (loading) {
+    state.loadingAudio = !!loading
+    els.playBtn.classList.toggle('loading', state.loadingAudio)
+    if (!state.loadingAudio) updatePlayIcon()
+  }
+
+  function updatePlayIcon () {
+    const paused = els.audio.paused
+    iconUse(els.playIcon, paused ? 'i-play' : 'i-pause')
+    els.playBtn.classList.toggle('paused', paused)
+    els.playBtn.title = paused ? '播放' : '暂停'
+    els.playBtn.setAttribute('aria-label', paused ? '播放' : '暂停')
+  }
 
   function togglePlay () {
-    if (currentIndex < 0) {
-      // No track selected yet — surface the search panel so the
-      // listener picks one.
-      if (currentResults.length > 0) playIndex(0)
-      else togglePanel(true)
+    if (!state.currentTrack) {
+      if (state.queue.length) playQueueIndex(Math.max(0, state.queueIndex))
+      else showView('search')
       return
     }
     if (els.audio.paused) els.audio.play().catch(() => {})
     else els.audio.pause()
   }
-  els.playBtn.addEventListener('click', togglePlay)
+
+  function nextIndex (direction) {
+    if (!state.queue.length) return -1
+    if (state.shuffle === 'on' && state.queue.length > 1) {
+      let next = state.queueIndex
+      while (next === state.queueIndex) next = Math.floor(Math.random() * state.queue.length)
+      return next
+    }
+    const candidate = state.queueIndex + direction
+    if (candidate >= 0 && candidate < state.queue.length) return candidate
+    if (state.repeat === 'all') return candidate < 0 ? state.queue.length - 1 : 0
+    return -1
+  }
 
   function advance (direction) {
-    if (currentResults.length === 0) return
-    if (currentIndex < 0) { playIndex(0); return }
-    if (shuffleMode === 'on' && currentResults.length > 1) {
-      let next
-      do { next = Math.floor(Math.random() * currentResults.length) } while (next === currentIndex)
-      playIndex(next)
-      return
-    }
-    const next = (currentIndex + direction + currentResults.length) % currentResults.length
-    playIndex(next)
+    const index = nextIndex(direction)
+    if (index >= 0) playQueueIndex(index)
   }
+
+  els.playBtn.addEventListener('click', togglePlay)
   els.prevBtn.addEventListener('click', () => advance(-1))
   els.nextBtn.addEventListener('click', () => advance(1))
-
-  // End-of-track honoring shuffle + loop:
-  //   loop=single → replay current
-  //   shuffle on  → random index (avoid the same one twice)
-  //   loop=all    → wrap on overflow
-  //   loop=off    → stop on overflow
-  els.audio.addEventListener('ended', () => {
-    if (currentIndex < 0 || currentResults.length === 0) return
-    if (loopMode === 'single') { playIndex(currentIndex); return }
-    if (shuffleMode === 'on') {
-      if (currentResults.length === 1) {
-        if (loopMode === 'all') playIndex(0)
-        return
-      }
-      let next
-      do { next = Math.floor(Math.random() * currentResults.length) } while (next === currentIndex)
-      playIndex(next)
-      return
-    }
-    const next = currentIndex + 1
-    if (next < currentResults.length) playIndex(next)
-    else if (loopMode === 'all') playIndex(0)
+  els.shuffleBtn.addEventListener('click', () => {
+    state.shuffle = state.shuffle === 'on' ? 'off' : 'on'
+    renderModes()
+  })
+  els.loopBtn.addEventListener('click', () => {
+    state.repeat = state.repeat === 'off' ? 'all' : state.repeat === 'all' ? 'single' : 'off'
+    renderModes()
   })
 
-  /* ---------- Audio events → UI ---------- */
-
-  function setMediaPlaybackState (state) {
-    if (!('mediaSession' in navigator)) return
-    try { navigator.mediaSession.playbackState = state } catch {}
+  function renderModes () {
+    els.shuffleBtn.dataset.mode = state.shuffle
+    els.loopBtn.dataset.mode = state.repeat
+    els.repeatBadge.textContent = state.repeat === 'single' ? '1' : ''
+    els.shuffleBtn.title = state.shuffle === 'on' ? '关闭随机播放' : '随机播放'
+    els.loopBtn.title = state.repeat === 'off' ? '开启列表循环' : state.repeat === 'all' ? '切换单曲循环' : '关闭循环'
+    writeJson(STORAGE.modes, { shuffle: state.shuffle, loop: state.repeat })
   }
 
-  // Auto-skip-on-error: a single track 404 (Meting-API "VIP only" /
-  // "taken down", or upstream HTTP2 cut mid-stream) shouldn't stall
-  // the whole session — advance after a short pause so the listener
-  // notices the skip without it feeling jarring. Counter prevents an
-  // infinite skip loop when every track in the list is dead. Reset
-  // every time a track *actually* starts producing audio.
-  let consecutiveErrors = 0
-  let pendingSkipTimer = 0
+  function syncCurrentRows () {
+    const key = trackKey(state.currentTrack)
+    $$('.track-row').forEach((row) => row.classList.toggle('playing', !!key && row.dataset.trackKey === key))
+  }
 
-  els.audio.addEventListener('play',     () => { setLoading(loadingState); setMediaPlaybackState('playing') })
-  els.audio.addEventListener('pause',    () => { setLoading(loadingState); setMediaPlaybackState('paused') })
+  function renderQueue () {
+    els.queueCurrent.innerHTML = ''
+    els.queueList.innerHTML = ''
+    if (!state.currentTrack) {
+      els.queueNow.hidden = true
+      const empty = document.createElement('div')
+      empty.className = 'queue-empty'
+      empty.textContent = '播放搜索结果或歌单后，接下来要播放的歌曲会显示在这里。'
+      els.queueList.appendChild(empty)
+      return
+    }
+    els.queueNow.hidden = false
+    const current = document.createElement('div')
+    current.className = 'queue-current-card'
+    current.appendChild(createCover(state.currentTrack, 'row-cover', true))
+    current.appendChild(createTrackCopy(state.currentTrack))
+    els.queueCurrent.appendChild(current)
+
+    const upcoming = state.queue.map((track, index) => ({ track, index })).filter((entry) => entry.index !== state.queueIndex)
+    if (!upcoming.length) {
+      const empty = document.createElement('div')
+      empty.className = 'queue-empty'
+      empty.textContent = '队列里没有其他歌曲。'
+      els.queueList.appendChild(empty)
+      return
+    }
+    upcoming.forEach(({ track, index }) => {
+      const row = document.createElement('div')
+      row.className = 'queue-row'
+      row.appendChild(createCover(track, 'row-cover'))
+      row.appendChild(createTrackCopy(track))
+      row.addEventListener('click', () => playQueueIndex(index))
+      els.queueList.appendChild(row)
+    })
+  }
+
+  function createTrackCopy (track) {
+    const copy = document.createElement('div')
+    copy.className = 'track-copy'
+    const title = document.createElement('span')
+    title.className = 'track-title'
+    title.textContent = track.title
+    const author = document.createElement('span')
+    author.className = 'track-author'
+    author.textContent = track.author
+    copy.append(title, author)
+    return copy
+  }
+
+  els.clearQueue.addEventListener('click', () => {
+    if (state.currentTrack) {
+      state.queue = [state.currentTrack]
+      state.queueIndex = 0
+    } else {
+      state.queue = []
+      state.queueIndex = -1
+    }
+    renderQueue()
+    updateTransportEnabled()
+    toast('播放队列已清理')
+  })
+
+  /* ---------- Side panel ---------- */
+
+  function openPanel (name) {
+    const shouldClose = state.openPanel === name && !els.contextPanel.hidden
+    state.openPanel = shouldClose ? null : name
+    els.contextPanel.hidden = !state.openPanel
+    els.app.classList.toggle('panel-open', !!state.openPanel)
+    $$('.panel-trigger').forEach((button) => button.classList.toggle('active', button.dataset.panel === state.openPanel))
+    if (state.openPanel) setPanelPage(state.openPanel)
+  }
+
+  function setPanelPage (name) {
+    state.openPanel = name
+    $$('[data-panel-tab]').forEach((tab) => tab.classList.toggle('active', tab.dataset.panelTab === name))
+    $$('[data-panel-page]').forEach((page) => {
+      const active = page.dataset.panelPage === name
+      page.hidden = !active
+      page.classList.toggle('active', active)
+    })
+    if (name === 'lyrics') requestAnimationFrame(positionLyrics)
+  }
+
+  $$('.panel-trigger').forEach((button) => button.addEventListener('click', () => openPanel(button.dataset.panel)))
+  $$('[data-panel-tab]').forEach((button) => button.addEventListener('click', () => setPanelPage(button.dataset.panelTab)))
+  els.closePanel.addEventListener('click', () => openPanel(state.openPanel))
+
+  /* ---------- Audio events and progress ---------- */
+
+  els.audio.addEventListener('play', () => { setLoading(state.loadingAudio); updatePlayIcon(); setMediaPlaybackState('playing') })
+  els.audio.addEventListener('pause', () => { updatePlayIcon(); setMediaPlaybackState('paused') })
   els.audio.addEventListener('loadstart', () => setLoading(true))
-  els.audio.addEventListener('waiting',   () => setLoading(true))
-  els.audio.addEventListener('canplay',   () => setLoading(false))
-  els.audio.addEventListener('playing',   () => {
-    setLoading(false)
-    consecutiveErrors = 0
+  els.audio.addEventListener('waiting', () => setLoading(true))
+  els.audio.addEventListener('canplay', () => setLoading(false))
+  els.audio.addEventListener('playing', () => { setLoading(false); state.consecutiveErrors = 0 })
+  els.audio.addEventListener('ended', () => {
+    if (state.repeat === 'single') { els.audio.currentTime = 0; els.audio.play().catch(() => {}); return }
+    const index = nextIndex(1)
+    if (index >= 0) playQueueIndex(index)
   })
   els.audio.addEventListener('error', () => {
     setLoading(false)
     setMediaPlaybackState('none')
     if (!els.audio.src) return
-    console.warn('[rmusic] audio error for', els.audio.currentSrc, 'code=', els.audio.error?.code)
-
-    consecutiveErrors += 1
-    // Single-loop is an explicit "stay on this track" — don't skip.
-    if (loopMode === 'single') {
-      els.nowAuthor.textContent = '本曲加载失败'
+    state.consecutiveErrors += 1
+    if (state.repeat === 'single') {
+      toast('当前歌曲加载失败，请切换歌曲', 'error')
       return
     }
-    if (consecutiveErrors >= 3 || currentResults.length === 0) {
-      consecutiveErrors = 0
-      els.nowAuthor.textContent = '连续多曲不可播放,请换关键词'
+    if (state.consecutiveErrors >= 3) {
+      state.consecutiveErrors = 0
+      toast('连续多首歌曲不可播放，请切换音源', 'error')
       return
     }
-    els.nowAuthor.textContent = '本曲不可播放,跳到下一首…'
+    toast('当前歌曲不可播放，正在跳到下一首', 'error')
     clearTimeout(pendingSkipTimer)
-    pendingSkipTimer = setTimeout(() => advance(1), 800)
+    pendingSkipTimer = setTimeout(() => advance(1), 850)
   })
-
-  /* ---------- Progress bar ---------- */
-
-  function formatTime (s) {
-    if (!isFinite(s) || s < 0) return '0:00'
-    const m = Math.floor(s / 60)
-    const r = Math.floor(s % 60)
-    return m + ':' + (r < 10 ? '0' + r : r)
-  }
 
   function updateProgress () {
-    const t = els.audio.currentTime || 0
-    const d = els.audio.duration || 0
-    els.currTime.textContent = formatTime(t)
-    els.duration.textContent = formatTime(d)
-    const pct = d > 0 ? (t / d) * 100 : 0
+    const current = els.audio.currentTime || 0
+    const duration = els.audio.duration || 0
+    els.currTime.textContent = formatTime(current)
+    els.duration.textContent = formatTime(duration)
+    const percent = duration > 0 ? Math.min(100, (current / duration) * 100) : 0
     if (!progressDragging) {
-      els.progressFill.style.width = pct + '%'
-      els.progressThumb.style.left = pct + '%'
+      els.progressFill.style.width = percent + '%'
+      els.progressThumb.style.left = percent + '%'
     }
   }
-  els.audio.addEventListener('timeupdate', updateProgress)
-  els.audio.addEventListener('durationchange', updateProgress)
-  // Throttle position-state pushes — timeupdate fires ~4×/s in
-  // Chromium and the OS only needs occasional refreshes. Cheap
-  // setTimeout-debounce keeps the lock-screen scrubber in sync
-  // without spamming the API.
-  let positionPushTimer = 0
-  els.audio.addEventListener('timeupdate', () => {
-    if (positionPushTimer) return
-    positionPushTimer = setTimeout(() => {
-      positionPushTimer = 0
-      updateMediaPosition()
-    }, 800)
-  })
-  els.audio.addEventListener('durationchange', updateMediaPosition)
-  els.audio.addEventListener('ratechange', updateMediaPosition)
-
-  /* ---------- Next-track pre-warm ----------
-   *
-   * iOS Safari's background tab killer pulls the rug fast: once
-   * the current audio element goes idle (i.e. between `ended` and
-   * the new `loadeddata`), the OS suspends the tab and the new
-   * track silently never starts. The `playIndex` reorder above
-   * keeps the audio element busy synchronously, but if the new
-   * URL takes a long time to first-byte (cold R2 cache + slow
-   * upstream resolution) the gap is still there.
-   *
-   * Mitigate by HEAD-prefetching the next track's audio URL when
-   * we're ≤8 s from the end of the current one. That nudges the
-   * Meting-API proxy worker to resolve the upstream URL and start
-   * populating R2 in the background, so the actual `src =
-   * next.url` 8 s later either hits R2 directly or arrives over a
-   * warm connection. Per-track latched so we don't re-fetch every
-   * timeupdate tick.
-   */
-  let _prewarmedTrackUrl = ''
-  els.audio.addEventListener('timeupdate', () => {
-    const d = els.audio.duration || 0
-    if (d <= 0 || currentResults.length <= 1 || currentIndex < 0) return
-    const remaining = d - (els.audio.currentTime || 0)
-    if (remaining > 8 || remaining < 0) return
-    // Pick the same index `ended` would pick — single/all/shuffle
-    // semantics already lived in the ended handler; we just mirror
-    // the "next sequential" rule here, which covers the common
-    // case. Shuffle picks something different at the time of
-    // `ended`, which is fine: at worst the pre-warm hit the wrong
-    // R2 key, no user-visible regression.
-    const nextIdx = (currentIndex + 1) % currentResults.length
-    const nextTrack = currentResults[nextIdx]
-    if (!nextTrack?.url || _prewarmedTrackUrl === nextTrack.url) return
-    _prewarmedTrackUrl = nextTrack.url
-    // HEAD so the Meting-API proxy worker resolves the upstream URL
-    // + tees the body into R2 (its handler kicks off the full-body
-    // fetch via ctx.waitUntil regardless of HEAD vs GET).
-    fetch(nextTrack.url, { method: 'HEAD' }).catch(() => {})
-  })
 
   function updateBuffered () {
-    const d = els.audio.duration || 0
-    if (d <= 0 || els.audio.buffered.length === 0) {
+    const duration = els.audio.duration || 0
+    if (duration <= 0 || !els.audio.buffered.length) {
       els.progressBuffered.style.width = '0%'
       return
     }
     const end = els.audio.buffered.end(els.audio.buffered.length - 1)
-    els.progressBuffered.style.width = ((end / d) * 100) + '%'
+    els.progressBuffered.style.width = Math.min(100, (end / duration) * 100) + '%'
   }
-  els.audio.addEventListener('progress', updateBuffered)
-  els.audio.addEventListener('timeupdate', updateBuffered)
 
-  // Progress bar drag + click. PointerEvents collapse mouse and
-  // touch into one API; the bar captures the pointer on down so we
-  // get the move/up events even when the finger drifts off-element.
-  let progressDragging = false
-  function pctFromEvent (e) {
+  function percentFromPointer (event) {
     const rect = els.progressBar.getBoundingClientRect()
-    let x = e.clientX
-    if (x === undefined && e.touches && e.touches[0]) x = e.touches[0].clientX
-    const pct = Math.max(0, Math.min(1, (x - rect.left) / rect.width))
-    return pct
+    return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
   }
-  function seekToPct (pct) {
-    const d = els.audio.duration
-    if (!isFinite(d) || d <= 0) return
-    els.audio.currentTime = pct * d
-    els.progressFill.style.width = (pct * 100) + '%'
-    els.progressThumb.style.left = (pct * 100) + '%'
-    els.currTime.textContent = formatTime(pct * d)
+
+  function seekPercent (percent) {
+    const duration = els.audio.duration
+    if (!Number.isFinite(duration) || duration <= 0) return
+    els.audio.currentTime = duration * percent
+    els.progressFill.style.width = (percent * 100) + '%'
+    els.progressThumb.style.left = (percent * 100) + '%'
+    els.currTime.textContent = formatTime(duration * percent)
   }
-  els.progressBar.addEventListener('pointerdown', (e) => {
-    if (currentIndex < 0) return
+
+  els.progressBar.addEventListener('pointerdown', (event) => {
+    if (!state.currentTrack) return
     progressDragging = true
     els.progressBar.classList.add('dragging')
-    els.progressBar.setPointerCapture(e.pointerId)
-    seekToPct(pctFromEvent(e))
+    els.progressBar.setPointerCapture(event.pointerId)
+    seekPercent(percentFromPointer(event))
   })
-  els.progressBar.addEventListener('pointermove', (e) => {
-    if (!progressDragging) return
-    seekToPct(pctFromEvent(e))
-  })
-  els.progressBar.addEventListener('pointerup', (e) => {
-    if (!progressDragging) return
+  els.progressBar.addEventListener('pointermove', (event) => { if (progressDragging) seekPercent(percentFromPointer(event)) })
+  els.progressBar.addEventListener('pointerup', (event) => {
     progressDragging = false
     els.progressBar.classList.remove('dragging')
-    try { els.progressBar.releasePointerCapture(e.pointerId) } catch {}
+    try { els.progressBar.releasePointerCapture(event.pointerId) } catch {}
   })
-  els.progressBar.addEventListener('pointercancel', () => {
-    progressDragging = false
-    els.progressBar.classList.remove('dragging')
+  els.progressBar.addEventListener('pointercancel', () => { progressDragging = false; els.progressBar.classList.remove('dragging') })
+
+  els.audio.addEventListener('timeupdate', () => {
+    updateProgress()
+    setActiveLyrics()
+    maybePrewarmNext()
   })
+  els.audio.addEventListener('durationchange', () => { updateProgress(); updateMediaPosition() })
+  els.audio.addEventListener('progress', updateBuffered)
 
-  /* ---------- LRC: parse + render + auto-scroll ---------- */
-
-  async function loadLrc (lrcUrl) {
-    lrcData = []
-    _lastWordLineIdx = -1
-    els.lrcList.innerHTML = ''
-    delete els.lrcList.dataset.intro
-    els.lrcList.style.transform = ''
-    if (!lrcUrl) return
-    try {
-      const res = await fetch(lrcUrl)
-      if (!res.ok) return
-      const text = await res.text()
-      lrcData = parseLrc(text)
-      renderLrc()
-    } catch { /* LRC missing is non-fatal */ }
+  function maybePrewarmNext () {
+    const duration = els.audio.duration || 0
+    if (duration <= 0 || duration - els.audio.currentTime > 8) return
+    const index = state.queueIndex + 1
+    const next = state.queue[index]
+    if (!next?.url || prewarmedUrl === next.url) return
+    prewarmedUrl = next.url
+    fetch(next.url, { method: 'HEAD' }).catch(() => {})
   }
 
-  /* Parse LRC OR Enhanced LRC.
-   *
-   * Standard LRC:                 `[mm:ss.xx]words`
-   * Enhanced LRC (per-word):      `[mm:ss.xx]<mm:ss.xx>word1<mm:ss.xx>word2<mm:ss.xx>`
-   *
-   * Output normalised to a single shape so renderLrc doesn't care:
-   *
-   *   [{ time, words: [{ t, text }] }]
-   *
-   * Standard lines compress to a single-word entry. Word-level
-   * lines preserve the inline `<>` timing as one entry per word.
-   * The trailing `<>` marker (end-of-line) is dropped — we don't
-   * render a phantom empty word. */
-  /* Parse timestamp fragment (mm,ss,frac) into seconds. `frac` is
-   * the digit string after the dot — interpreted in its own base
-   * so `.1` = 0.1 s, `.11` = 0.11 s, `.111` = 0.111 s. Standard LRC
-   * spec is centiseconds (2 digits) but karaoke formats often emit
-   * milliseconds (3 digits) so we handle both. */
-  function lrcStampToSeconds (mm, ss, frac) {
-    const fracSec = frac ? parseInt(frac, 10) / Math.pow(10, frac.length) : 0
-    return parseInt(mm, 10) * 60 + parseInt(ss, 10) + fracSec
-  }
+  const savedVolume = Number.parseFloat(readStorage(STORAGE.volume, '0.8'))
+  els.volume.value = String(Number.isFinite(savedVolume) ? Math.min(1, Math.max(0, savedVolume)) : 0.8)
+  els.audio.volume = Number(els.volume.value)
+  els.volume.addEventListener('input', () => {
+    els.audio.volume = Number(els.volume.value)
+    try { localStorage.setItem(STORAGE.volume, els.volume.value) } catch {}
+  })
 
-  /* Parse LRC OR Enhanced LRC, then group co-timestamped subs.
-   *
-   *   Standard LRC:            `[mm:ss.xx]words`
-   *   Enhanced LRC (per-word): `[mm:ss.xx]<mm:ss.xx>w1<mm:ss.xx>w2<mm:ss.xx>`
-   *   Translation merge from   Meting-API emits the translation on
-   *   its own line with the *same* `[mm:ss.xx]` head as the source
-   *   line — e.g. lyric-enhanced.js's mergeTranslation puts the
-   *   translation right after the source as
-   *   `[00:21.10](粉橙交织的天空…)`.
-   *   Duet / overlapping vocal lines also routinely share a
-   *   timestamp.
-   *
-   * Output is a list of GROUPS — each group is a single semantic
-   * "line" the listener sees and tracks as one unit:
-   *
-   *   [{
-   *     time,
-   *     subs: [ { words: [{ t, text }], wordLevel: bool } ]
-   *   }]
-   *
-   * Standard LRC subs compress to a single-word entry; word-level
-   * subs preserve the inline `<>` timestamps as one entry per word.
-   * `wordLevel` is true when the original LRC had more than one
-   * inline `<>` marker, so the renderer knows whether to expect
-   * per-word highlight on this sub. */
-  const GROUP_TOLERANCE_SEC = 0.05
+  /* ---------- Media Session ---------- */
 
-  function parseLrc (text) {
-    if (!text) return []
-    const flat = []
-    text.split(/\r?\n/).forEach((line) => {
-      const headRe = /\[(\d+):(\d+)(?:\.(\d+))?\]/g
-      const heads = []
-      let m
-      let bodyStart = 0
-      while ((m = headRe.exec(line)) !== null && m.index === bodyStart) {
-        heads.push(lrcStampToSeconds(m[1], m[2], m[3]))
-        bodyStart = headRe.lastIndex
-      }
-      if (heads.length === 0) return
-      const body = line.slice(bodyStart)
-      const wordRe = /<(\d+):(\d+)(?:\.(\d+))?>([^<]*)/g
-      const words = []
-      let lastIndex = 0
-      let wm
-      while ((wm = wordRe.exec(body)) !== null) {
-        const t = lrcStampToSeconds(wm[1], wm[2], wm[3])
-        const wtext = wm[4]
-        if (wtext !== '') words.push({ t, text: wtext })
-        lastIndex = wordRe.lastIndex
-      }
-      if (words.length > 0) {
-        heads.forEach((time) => flat.push({ time, words: words.slice(), wordLevel: words.length > 1 }))
-        return
-      }
-      // Standard LRC fallback — wrap the line's text in a single
-      // "word" so rendering / highlight code doesn't have to branch.
-      const plain = body.slice(lastIndex).trim()
-      heads.forEach((time) => flat.push({ time, words: [{ t: time, text: plain }], wordLevel: false }))
-    })
-    flat.sort((a, b) => a.time - b.time)
-    // Group lines whose timestamps land within GROUP_TOLERANCE_SEC.
-    // The merged Enhanced LRC emits source + translation back to
-    // back at the same `[mm:ss.xx]`; duets routinely do the same.
-    // We treat each group as ONE row the listener sees + scrolls
-    // through. First sub in the group is the "primary" that owns
-    // the per-word highlight.
-    const groups = []
-    for (const line of flat) {
-      const last = groups[groups.length - 1]
-      if (last && Math.abs(line.time - last.time) <= GROUP_TOLERANCE_SEC) {
-        last.subs.push(line)
-      } else {
-        groups.push({ time: line.time, subs: [line] })
-      }
+  function updateMediaSession (track) {
+    if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return
+    const metadata = { title: track.title, artist: track.author, album: track.album || state.queueLabel || 'RMusic' }
+    if (track.pic) {
+      const artwork = new URL(track.pic, location.href).href
+      metadata.artwork = [{ src: artwork, sizes: '300x300', type: 'image/jpeg' }, { src: artwork, sizes: '512x512', type: 'image/jpeg' }]
     }
+    try { navigator.mediaSession.metadata = new MediaMetadata(metadata) } catch {}
+    updateMediaPosition()
+  }
+
+  function setMediaPlaybackState (value) {
+    if (!('mediaSession' in navigator)) return
+    try { navigator.mediaSession.playbackState = value } catch {}
+  }
+
+  function updateMediaPosition () {
+    if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return
+    const duration = els.audio.duration
+    if (!Number.isFinite(duration) || duration <= 0) return
+    try {
+      navigator.mediaSession.setPositionState({ duration, playbackRate: els.audio.playbackRate || 1, position: Math.min(duration, Math.max(0, els.audio.currentTime || 0)) })
+    } catch {}
+  }
+
+  function setupMediaSession () {
+    if (!('mediaSession' in navigator)) return
+    const set = (name, handler) => { try { navigator.mediaSession.setActionHandler(name, handler) } catch {} }
+    set('play', () => els.audio.play().catch(() => {}))
+    set('pause', () => els.audio.pause())
+    set('previoustrack', () => advance(-1))
+    set('nexttrack', () => advance(1))
+    set('seekto', (detail) => {
+      if (typeof detail.seekTime !== 'number') return
+      if (detail.fastSeek && typeof els.audio.fastSeek === 'function') els.audio.fastSeek(detail.seekTime)
+      else els.audio.currentTime = detail.seekTime
+    })
+    set('seekbackward', (detail) => { els.audio.currentTime = Math.max(0, els.audio.currentTime - (detail.seekOffset || 10)) })
+    set('seekforward', (detail) => { els.audio.currentTime = Math.min(els.audio.duration || Infinity, els.audio.currentTime + (detail.seekOffset || 10)) })
+  }
+
+  /* ---------- Lyrics ---------- */
+
+  async function loadLyrics (track) {
+    const requestId = ++lyricsRequestId
+    lrcData = []
+    lastLrcIndex = -1
+    els.lrcList.innerHTML = '<li class="lyrics-placeholder">正在寻找歌词…</li>'
+    const urls = [track.lrcpword, track.lrc].filter(Boolean)
+    for (const url of urls) {
+      try {
+        const response = await fetch(url)
+        if (!response.ok) continue
+        const data = parseLrc(await response.text())
+        if (requestId !== lyricsRequestId) return
+        if (data.length) {
+          lrcData = data
+          renderLyrics()
+          return
+        }
+      } catch {}
+    }
+    if (requestId !== lyricsRequestId) return
+    els.lrcList.innerHTML = '<li class="lyrics-placeholder">这首歌暂时没有歌词。<br>音乐仍会继续播放。</li>'
+  }
+
+  function lrcStampToSeconds (minutes, seconds, fraction) {
+    const fractionSeconds = fraction ? Number.parseInt(fraction, 10) / Math.pow(10, fraction.length) : 0
+    return Number.parseInt(minutes, 10) * 60 + Number.parseInt(seconds, 10) + fractionSeconds
+  }
+
+  function parseLrc (source) {
+    if (!source) return []
+    const lines = []
+    source.split(/\r?\n/).forEach((rawLine) => {
+      const headPattern = /\[(\d+):(\d+)(?:\.(\d+))?\]/g
+      const heads = []
+      let match
+      let bodyStart = 0
+      while ((match = headPattern.exec(rawLine)) !== null && match.index === bodyStart) {
+        heads.push(lrcStampToSeconds(match[1], match[2], match[3]))
+        bodyStart = headPattern.lastIndex
+      }
+      if (!heads.length) return
+      const body = rawLine.slice(bodyStart)
+      const wordPattern = /<(\d+):(\d+)(?:\.(\d+))?>([^<]*)/g
+      const words = []
+      let wordMatch
+      while ((wordMatch = wordPattern.exec(body)) !== null) {
+        if (wordMatch[4] !== '') words.push({ time: lrcStampToSeconds(wordMatch[1], wordMatch[2], wordMatch[3]), text: wordMatch[4] })
+      }
+      heads.forEach((time) => {
+        const finalWords = words.length ? words.slice() : [{ time, text: body.replace(wordPattern, '').trim() }]
+        lines.push({ time, words: finalWords, wordLevel: finalWords.length > 1 })
+      })
+    })
+    lines.sort((a, b) => a.time - b.time)
+    const groups = []
+    lines.forEach((line) => {
+      const last = groups[groups.length - 1]
+      if (last && Math.abs(last.time - line.time) <= 0.05) last.subs.push(line)
+      else groups.push({ time: line.time, subs: [line] })
+    })
     return groups
   }
 
-  /** Pick the sub inside a group that should drive word-level
-   *  highlight. Prefer the first wordLevel sub; fall back to the
-   *  first sub for monolithic / line-only LRC. */
   function primarySub (group) {
-    for (const s of group.subs) if (s.wordLevel) return s
-    return group.subs[0]
+    return group.subs.find((sub) => sub.wordLevel) || group.subs[0]
   }
 
-  function renderLrc () {
-    const frag = document.createDocumentFragment()
-    lrcData.forEach((group, i) => {
-      const li = document.createElement('li')
-      li.dataset.time = String(group.time)
-      li.dataset.index = String(i)
+  function renderLyrics () {
+    els.lrcList.innerHTML = ''
+    const fragment = document.createDocumentFragment()
+    lrcData.forEach((group) => {
+      const row = document.createElement('li')
+      row.dataset.time = String(group.time)
       const primary = primarySub(group)
       group.subs.forEach((sub) => {
-        const subDiv = document.createElement('div')
-        const isPrimary = sub === primary
-        subDiv.className = 'lrc-sub' + (isPrimary ? ' lrc-sub-primary' : ' lrc-sub-secondary')
-        if (sub.words.length === 0 || (sub.words.length === 1 && !sub.words[0].text)) {
-          // Truly empty sub — render a sentinel so the row doesn't
-          // collapse the LRC list's line-height math.
-          const sentinel = document.createElement('span')
-          sentinel.className = 'word'
-          sentinel.textContent = '♪'
-          subDiv.appendChild(sentinel)
-        } else {
-          sub.words.forEach((w, wi) => {
-            const span = document.createElement('span')
-            span.className = 'word'
-            span.dataset.t = String(w.t)
-            span.dataset.wi = String(wi)
-            span.textContent = w.text
-            subDiv.appendChild(span)
-          })
-        }
-        li.appendChild(subDiv)
-      })
-      // No per-li click listener — taps are detected in
-      // endLrcDrag's "didn't move" branch by reading e.target.
-      // Avoids the double-seek that happens when browsers
-      // synthesise a click after pointerup at the end of a drag.
-      frag.appendChild(li)
-    })
-    els.lrcList.appendChild(frag)
-    requestAnimationFrame(setLrcOffset)
-  }
-
-  /* Per-word highlight. Walks just the active line's spans, marks
-   * every word whose `t` is ≤ currentTime as "passed" and the
-   * latest one specifically as "current". When the active line
-   * itself changes we also clear the previous line's word classes,
-   * so seeking backwards through a song doesn't leave a trail of
-   * "passed" highlights on what's now a future line. */
-  let _lastWordLineIdx = -1
-  function setActiveWord () {
-    if (!lrcData.length) return
-    const idx = findLrcIndex()
-    if (idx < 0) return
-    if (_lastWordLineIdx >= 0 && _lastWordLineIdx !== idx) {
-      const oldLi = els.lrcList.children[_lastWordLineIdx]
-      if (oldLi) {
-        oldLi.querySelectorAll('.word-current, .word-passed').forEach((s) => {
-          s.classList.remove('word-current')
-          s.classList.remove('word-passed')
+        const line = document.createElement('div')
+        line.className = 'lrc-sub' + (sub === primary ? '' : ' lrc-sub-secondary')
+        const words = sub.words.length ? sub.words : [{ time: sub.time, text: '♪' }]
+        words.forEach((word) => {
+          const span = document.createElement('span')
+          span.className = 'word'
+          span.dataset.time = String(word.time)
+          span.textContent = word.text || '♪'
+          line.appendChild(span)
         })
-      }
-    }
-    _lastWordLineIdx = idx
-    const li = els.lrcList.children[idx]
-    if (!li) return
-    const group = lrcData[idx]
-    if (!group) return
-    // Light a word *before* its nominal start so the highlight
-    // never lags behind what the listener is hearing — singers'
-    // word onsets are typically a fraction earlier than the LRC
-    // timestamp, and the CSS transition into `.word-current`
-    // takes another ~150 ms to peak. WORD_LEAD_MS compensates for
-    // both. Tweak in one spot rather than scattering offsets.
-    const WORD_LEAD_MS = 180
-    const t = els.audio.currentTime + WORD_LEAD_MS / 1000
-    // The group's primary sub owns the per-word highlight. Find
-    // its position in this <li>'s children so we can target only
-    // that sub-div's spans (translation / secondary sub spans
-    // stay neutral). For monolithic groups (single sub) this
-    // collapses to "the only sub".
-    const primary = primarySub(group)
-    if (!primary || primary.words.length < 2) return
-    const subIdx = group.subs.indexOf(primary)
-    const subDiv = li.children[subIdx]
-    if (!subDiv) return
-    const spans = subDiv.querySelectorAll('.word')
-    let activeI = -1
-    for (let i = 0; i < primary.words.length; i++) {
-      if (primary.words[i].t <= t) activeI = i
-      else break
-    }
-    spans.forEach((s, i) => {
-      s.classList.toggle('word-passed', i < activeI)
-      s.classList.toggle('word-current', i === activeI)
+        row.appendChild(line)
+      })
+      row.addEventListener('click', () => {
+        els.audio.currentTime = group.time
+        if (els.audio.paused) els.audio.play().catch(() => {})
+      })
+      fragment.appendChild(row)
     })
+    els.lrcList.appendChild(fragment)
+    requestAnimationFrame(positionLyrics)
   }
-  els.audio.addEventListener('timeupdate', setActiveWord)
 
   function findLrcIndex () {
-    if (!lrcData.length) return -1
-    const t = els.audio.currentTime
-    for (let i = 0; i < lrcData.length; i++) {
-      if (t < lrcData[i].time) return i - 1
+    const current = els.audio.currentTime || 0
+    for (let index = 0; index < lrcData.length; index++) {
+      if (current < lrcData[index].time) return index - 1
     }
     return lrcData.length - 1
   }
 
-  /** Cumulative top offset (from list start, unscaled px) for an
-   *  index — handles the new world where each row's height varies
-   *  with how many subs the group holds (single-line vs orig +
-   *  translation, etc). */
-  function rowTopAt (idx) {
-    let top = 0
-    for (let i = 0; i < idx; i++) {
-      const child = els.lrcList.children[i]
-      if (child) top += child.clientHeight
+  function setActiveLyrics () {
+    if (!lrcData.length) return
+    const index = findLrcIndex()
+    if (index < 0) return
+    if (index !== lastLrcIndex) {
+      const old = els.lrcList.children[lastLrcIndex]
+      if (old) old.classList.remove('active')
+      const active = els.lrcList.children[index]
+      if (active) active.classList.add('active')
+      lastLrcIndex = index
+      positionLyrics()
     }
-    return top
+    const group = lrcData[index]
+    const row = els.lrcList.children[index]
+    const primary = primarySub(group)
+    if (!row || !primary || primary.words.length < 2) return
+    const line = row.children[group.subs.indexOf(primary)]
+    if (!line) return
+    const current = (els.audio.currentTime || 0) + 0.18
+    let wordIndex = -1
+    primary.words.forEach((word, indexValue) => { if (word.time <= current) wordIndex = indexValue })
+    Array.from(line.children).forEach((span, indexValue) => {
+      span.classList.toggle('word-passed', indexValue < wordIndex)
+      span.classList.toggle('word-current', indexValue === wordIndex)
+    })
   }
 
-  function setLrcOffset () {
-    if (lrcDragging) return  // user is scrubbing; don't fight them
-    if (!lrcData.length || !els.lrcList.children.length) return
-    if (els.lrcList.dataset.intro) return
-    const idx = findLrcIndex()
-    const container = els.lrcWrap
-    const containerH = container.clientHeight
-    const ulH = els.lrcList.clientHeight
-    let offset
-    if (idx < 0) {
-      offset = 0
-    } else {
-      const top = rowTopAt(idx)
-      const child = els.lrcList.children[idx]
-      const h = child ? child.clientHeight : 50
-      offset = containerH / 2 - top - h / 2
-    }
-    const maxOffset = containerH - ulH
-    if (offset < maxOffset) offset = maxOffset
-    if (offset > 0) offset = 0
+  function positionLyrics () {
+    if (lastLrcIndex < 0 || els.contextPanel.hidden || state.openPanel !== 'lyrics') return
+    const row = els.lrcList.children[lastLrcIndex]
+    if (!row || !els.lrcWrap.clientHeight) return
+    const offset = els.lrcWrap.clientHeight / 2 - row.offsetTop - row.offsetHeight / 2
     els.lrcList.style.transform = 'translateY(' + offset + 'px)'
-    const active = els.lrcList.querySelector('.active')
-    if (active) active.classList.remove('active')
-    const next = els.lrcList.children[idx]
-    if (next) next.classList.add('active')
-  }
-  els.audio.addEventListener('timeupdate', setLrcOffset)
-
-  /* ---------- LRC drag-to-seek ----------
-   *
-   * Drag the LRC vertically: every line's worth of motion seeks one
-   * line forward/back. Pause auto-scroll while dragging so the
-   * playhead doesn't fight the user's finger. On release, snap to
-   * the line under the centre marker and seek there.
-   */
-  let lrcDragging = false
-  let dragStartY = 0
-  let dragStartTransform = 0
-  let dragMoved = false
-
-  function currentTransformY () {
-    const m = (els.lrcList.style.transform || '').match(/translateY\((-?\d+(?:\.\d+)?)px\)/)
-    return m ? parseFloat(m[1]) : 0
   }
 
-  els.lrcWrap.addEventListener('pointerdown', (e) => {
-    if (!lrcData.length || els.lrcList.dataset.intro) return
-    // Buttons in the LRC slot? None right now, but skip if the
-    // event originated on an <a>/<button> defensively.
-    if (e.target.closest('button, a')) return
-    lrcDragging = true
-    dragMoved = false
-    dragStartY = e.clientY
-    dragStartTransform = currentTransformY()
-    els.lrcWrap.classList.add('dragging')
-    els.lrcWrap.setPointerCapture(e.pointerId)
-  })
-  els.lrcWrap.addEventListener('pointermove', (e) => {
-    if (!lrcDragging) return
-    const dy = e.clientY - dragStartY
-    if (Math.abs(dy) > 4) dragMoved = true
-    const newOffset = dragStartTransform + dy
-    els.lrcList.style.transform = 'translateY(' + newOffset + 'px)'
-  })
-  function endLrcDrag (e) {
-    if (!lrcDragging) return
-    lrcDragging = false
-    els.lrcWrap.classList.remove('dragging')
-    try { els.lrcWrap.releasePointerCapture(e.pointerId) } catch {}
-    if (!dragMoved) {
-      // It was a tap. Find the <li> under the pointer (e.target can
-      // be the inner text node) and seek to its timestamp.
-      const li = e.target && e.target.closest ? e.target.closest('li') : null
-      if (!li || !li.dataset.time) return
-      const t = parseFloat(li.dataset.time)
-      if (!isNaN(t)) {
-        els.audio.currentTime = t
-        if (els.audio.paused) els.audio.play().catch(() => {})
-      }
-      return
-    }
-    // Drag-end: walk variable-height rows from list top to find
-    // whichever row's centre is now closest to the container's
-    // centre. Uniform-height math is wrong now that a group with a
-    // translation sub is taller than a group with only the source.
-    const containerH = els.lrcWrap.clientHeight
-    const offset = currentTransformY()
-    const centerY = containerH / 2 - offset  // world-y inside list
-    let bestIdx = -1
-    let bestDist = Infinity
-    let accumTop = 0
-    for (let i = 0; i < els.lrcList.children.length; i++) {
-      const child = els.lrcList.children[i]
-      const h = child.clientHeight
-      const center = accumTop + h / 2
-      const dist = Math.abs(center - centerY)
-      if (dist < bestDist) {
-        bestDist = dist
-        bestIdx = i
-      }
-      accumTop += h
-    }
-    const clamped = Math.max(0, Math.min(lrcData.length - 1, bestIdx))
-    const row = lrcData[clamped]
-    if (row && isFinite(row.time)) {
-      els.audio.currentTime = row.time
-      if (els.audio.paused) els.audio.play().catch(() => {})
-    }
-    // Let the timeupdate listener re-centre on the new active line.
-    setLrcOffset()
-  }
-  els.lrcWrap.addEventListener('pointerup', endLrcDrag)
-  els.lrcWrap.addEventListener('pointercancel', endLrcDrag)
-
-  // Mouse wheel = same as drag, but in 60px-per-line increments.
-  els.lrcWrap.addEventListener('wheel', (e) => {
-    if (!lrcData.length || els.lrcList.dataset.intro) return
-    e.preventDefault()
-    const liH = els.lrcList.children[0]?.clientHeight || 50
-    const lineDelta = e.deltaY > 0 ? 1 : -1
-    const idx = Math.max(0, Math.min(lrcData.length - 1, (findLrcIndex() < 0 ? 0 : findLrcIndex()) + lineDelta))
-    const row = lrcData[idx]
-    if (row && isFinite(row.time)) {
-      els.audio.currentTime = row.time
-      if (els.audio.paused) els.audio.play().catch(() => {})
-      setLrcOffset()
-    }
-    void liH
+  els.lrcWrap.addEventListener('wheel', (event) => {
+    if (!lrcData.length) return
+    event.preventDefault()
+    const direction = event.deltaY > 0 ? 1 : -1
+    const index = Math.max(0, Math.min(lrcData.length - 1, findLrcIndex() + direction))
+    els.audio.currentTime = lrcData[index].time
+    if (els.audio.paused) els.audio.play().catch(() => {})
   }, { passive: false })
 
-  /* ---------- First-paint intro state ----------
-   *
-   * Keep the page from looking like a blank black slab before the
-   * first track loads. CSS supplies the radial backdrop; this
-   * paints a handful of static hint lines into the LRC slot.
-   */
-  function renderIntro () {
-    if (lrcData.length || currentResults.length) return
-    els.lrcList.innerHTML = ''
-    els.lrcList.dataset.intro = '1'
-    els.lrcList.style.transform = ''
-    const lines = [
-      'RMusic',
-      '点击右上角 ⌕ 搜一首歌',
-      '默认网易云 · 可换其他源',
-      '点歌词或拖动可调整进度',
-      '随机 / 顺序 · 全部 / 单曲循环'
-    ]
-    const activeIdx = 1
-    const frag = document.createDocumentFragment()
-    lines.forEach((s, i) => {
-      const li = document.createElement('li')
-      li.className = 'intro' + (i === activeIdx ? ' active' : '')
-      li.textContent = s
-      frag.appendChild(li)
-    })
-    els.lrcList.appendChild(frag)
+  /* ---------- Keyboard ---------- */
+
+  document.addEventListener('keydown', (event) => {
+    const editing = /^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName)
+    if (event.key === 'Escape') {
+      if (!els.playlistModal.hidden) closePlaylistModal()
+      else if (state.openPanel) openPanel(state.openPanel)
+      return
+    }
+    if (editing) return
+    if (event.key === '/') {
+      event.preventDefault()
+      els.query.focus()
+    } else if (event.code === 'Space') {
+      event.preventDefault()
+      togglePlay()
+    } else if (event.key === 'ArrowRight') {
+      els.audio.currentTime = Math.min(els.audio.duration || Infinity, els.audio.currentTime + 5)
+    } else if (event.key === 'ArrowLeft') {
+      els.audio.currentTime = Math.max(0, els.audio.currentTime - 5)
+    }
+  })
+
+  /* ---------- Boot ---------- */
+
+  function boot () {
+    const savedSource = readStorage(STORAGE.source)
+    if (savedSource && Array.from(els.server.options).some((option) => option.value === savedSource)) els.server.value = savedSource
+    els.playlistServer.value = els.server.value
+
+    const modes = readJson(STORAGE.modes, {})
+    if (modes.shuffle === 'on') state.shuffle = 'on'
+    if (['off', 'all', 'single'].includes(modes.loop)) state.repeat = modes.loop
+
+    setGreeting()
+    renderModes()
+    renderHome()
+    renderLibrary()
+    renderQueue()
+    updateTransportEnabled()
+    updatePlayIcon()
+    setupMediaSession()
+    els.lrcList.innerHTML = '<li class="lyrics-placeholder">播放歌曲后，这里会显示同步歌词。</li>'
+
+    const url = new URL(location.href)
+    const type = url.searchParams.get('type')
+    const id = url.searchParams.get('id')
+    const server = url.searchParams.get('server') || els.server.value
+    if (type === 'playlist' && id) {
+      const playlist = { server, id, name: url.searchParams.get('name') || ('歌单 ' + id) }
+      loadPlaylist(playlist).catch((error) => toast(error.message, 'error'))
+    } else if (url.searchParams.get('q')) {
+      els.server.value = server
+      runSearch(url.searchParams.get('q'))
+    } else {
+      showView('home')
+    }
   }
-  renderIntro()
+
+  boot()
 })()

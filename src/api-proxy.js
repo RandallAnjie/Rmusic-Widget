@@ -3,7 +3,7 @@
 // processing pass:
 //
 //   1. JSON array of tracks (search / song / playlist responses)
-//      → rewrite the embedded url/pic/lrc fields so the client only
+//      → rewrite the embedded url/pic/lrc/lrcpword fields so the client only
 //        ever sees this worker's host (rate limit applies, master
 //        token stays here).
 //   2. 302 redirect (pic) → preserve as-is so the <img> follows it
@@ -79,7 +79,7 @@ function publicProxyUrl (server, type, id) {
 }
 
 /**
- * Rewrite the embedded url/pic/lrc in a search/song/playlist
+ * Rewrite the embedded url/pic/lrc/lrcpword in a search/song/playlist
  * response so the widget calls back into this worker rather than
  * hitting the Meting-API directly. The Meting-API embeds an `auth=`
  * HMAC that's only valid against its own METING_TOKEN — useless to
@@ -99,17 +99,20 @@ function rewriteTrackList (tracks, server) {
     // so the widget hits our /api/proxy?type=lrcpword path; sources
     // without word-level data fall back to plain LRC server-side.
     const lrcpwordId = pickIdFromUrl(t.lrcpword)
+    // Preserve richer metadata (album, id, duration_ms, preview
+    // flags, etc.) for the full-page library UI, but always replace
+    // resource URLs with same-origin proxy paths. Never let an
+    // upstream signed URL accidentally escape into the browser.
     const out = {
-      title: t.title,
-      author: t.author,
-      url: urlId ? publicProxyUrl(server, 'url', urlId) : t.url,
-      pic: picId ? publicProxyUrl(server, 'pic', picId) : t.pic,
-      lrc: lrcId ? publicProxyUrl(server, 'lrc', lrcId) : t.lrc
+      ...t,
+      server,
+      url: urlId ? publicProxyUrl(server, 'url', urlId) : '',
+      pic: picId ? publicProxyUrl(server, 'pic', picId) : '',
+      lrc: lrcId ? publicProxyUrl(server, 'lrc', lrcId) : ''
     }
+    delete out.lrcpword
     if (lrcpwordId) {
       out.lrcpword = publicProxyUrl(server, 'lrcpword', lrcpwordId)
-    } else if (t.lrcpword) {
-      out.lrcpword = t.lrcpword
     }
     return out
   })
@@ -118,7 +121,7 @@ function rewriteTrackList (tracks, server) {
 function pickIdFromUrl (u) {
   if (typeof u !== 'string' || !u) return null
   try {
-    const parsed = new URL(u)
+    const parsed = new URL(u, 'https://music-api.internal')
     return parsed.searchParams.get('id')
   } catch {
     return null
@@ -127,7 +130,7 @@ function pickIdFromUrl (u) {
 
 /**
  * Main entry called by the worker for /api/proxy?server=X&type=Y&id=Z.
- * Handles auth-bearing types (url/pic/lrc) and metadata types
+ * Handles protected types (url/pic/lrcpword), public lrc, and metadata types
  * (search/song/album/artist/playlist) the same way: forward, decorate.
  */
 export async function proxyApi (request, config, params) {
@@ -181,7 +184,7 @@ export async function proxyApi (request, config, params) {
   }
 
   // Metadata path (search/song/album/artist/playlist): parse the
-  // JSON, rewrite the embedded url/pic/lrc to point back at this
+  // JSON, rewrite the embedded resource links to point back at this
   // worker, return the rewritten body.
   if (upstream.status >= 400) return passThrough(upstream)
   let payload
