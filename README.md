@@ -1,9 +1,10 @@
 # RMusic
 
-RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整网页音乐播放器。它保留了原版 widget 的多平台搜索、连续播放、逐字歌词和 Media Session 能力，并升级成类似 Spotify 的单页应用：
+RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整网页音乐播放器。它保留了原版 widget 的多平台能力、连续播放、逐字歌词和 Media Session，并升级成类似 Spotify 的单页应用：
 
 - 首页、搜索、音乐库和歌单详情四类视图
 - 搜索结果或完整歌单作为连续播放队列
+- 自动聚合多个音乐平台，合并重复歌曲并按搜索词相关度排序
 - 队列、随机播放、列表/单曲循环、进度和音量控制
 - 标准 LRC + Enhanced LRC 逐字歌词
 - 喜欢的歌曲、最近播放和保存的在线歌单
@@ -12,7 +13,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - Tencent vkey 拒绝时按歌曲名与歌手自动回退网易云 / YouTube Music
 - OS 锁屏 / 蓝牙耳机 / 系统媒体控件（Media Session）
 
-所有收藏数据只保存在浏览器 `localStorage`。在线歌单仅保存平台、歌单 ID 与名称，打开时实时请求最新曲目。
+所有收藏数据只保存在浏览器 `localStorage`。在线歌单会从分享链接识别平台；仅输入 ID 时由 Worker 自动探测，保存后打开时实时请求最新曲目。
 
 ## 安全模型
 
@@ -21,7 +22,8 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 1. Worker 在服务端注入 `MUSIC_API_TOKEN`；浏览器永远看不到 master token。
 2. Meting-API 返回的 `url` / `pic` / `lrc` / `lrcpword` 会重写成本站代理 URL。
 3. 音频 Range、封面和歌词均通过代理返回；上游错误状态保持不变，只有 Tencent `403/404` 音频会进行严格同曲回退。
-4. 每 IP、每 isolate 有滑动窗口限流，默认 `180` 次/分钟。
+4. 聚合搜索由 Worker 并行请求各平台，单个平台失败只会被跳过，不会把 master token 或跨域资源地址暴露给浏览器。
+5. 每 IP、每 isolate 有滑动窗口限流，默认 `180` 次/分钟。
 
 ## 路由
 
@@ -30,14 +32,20 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | `GET /` | RMusic 单页应用 |
 | `GET /widget.css` | 浏览器缓存的应用样式 |
 | `GET /widget.js` | 浏览器缓存的应用控制器 |
-| `GET /api/proxy?server=…&type=…&id=…` | Meting-API 安全代理 |
+| `GET /api/proxy?server=…&type=…&id=…` | Meting-API 安全代理；搜索默认 `server=aggregate` |
 
 根路径支持轻量 deep link：
 
 ```text
-/?q=Lemon&server=netease
+/?q=Lemon
 /?type=playlist&server=tencent&id=9505357778&name=My%20Playlist
 ```
+
+### 聚合搜索
+
+前端不再展示搜索音源选择。`server=aggregate&type=search` 会并行查询 QQ 音乐、网易云、酷狗、YouTube Music、酷我、百度、Apple Music 和 Spotify；不可用或超时的平台自动跳过。结果会过滤无效条目，合并标题和歌手完全相同的重复项，并综合标题、歌手、专辑、关键词覆盖率与平台原始排名计算相关度，最多返回 80 首。
+
+聚合请求返回 `X-RMusic-Sources` 响应头，列出本次成功参与的音源。具体歌曲仍保留实际 `server`，因此播放、封面、歌词、收藏和最近播放可以继续使用对应平台资源。
 
 ### Tencent 音频回退
 
@@ -97,7 +105,6 @@ build.mjs              esbuild 打包与资源 hash
 
 以下内容保存在当前域名的 `localStorage`：
 
-- 音源选择
 - 音量、随机与循环模式
 - 最近播放（最多 30 首）
 - 喜欢的歌曲（最多 200 首）

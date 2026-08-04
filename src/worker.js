@@ -34,7 +34,7 @@ const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, HEAD, OPTIONS',
   'access-control-allow-headers': 'Content-Type, Range',
-  'access-control-expose-headers': 'Content-Range, X-RateLimit-Limit, X-RateLimit-Remaining, X-RMusic-Fallback, X-RMusic-Original-Server',
+  'access-control-expose-headers': 'Content-Range, X-RateLimit-Limit, X-RateLimit-Remaining, X-RMusic-Fallback, X-RMusic-Original-Server, X-RMusic-Sources',
   'access-control-max-age': '86400'
 }
 
@@ -135,7 +135,7 @@ async function route (request, env) {
     }
 
     const params = {
-      server: url.searchParams.get('server') || 'ytmusic',
+      server: url.searchParams.get('server') || 'aggregate',
       type: url.searchParams.get('type') || 'search',
       id: url.searchParams.get('id') ?? '',
       r: url.searchParams.get('r') ?? undefined,

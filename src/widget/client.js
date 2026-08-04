@@ -21,7 +21,6 @@
     searchForm: $('global-search'),
     query: $('query'),
     clearSearch: $('clearSearch'),
-    server: $('server'),
     greeting: $('greeting'),
     toast: $('toast'),
     recentGrid: $('recent-grid'),
@@ -82,7 +81,6 @@
     playlistModal: $('playlist-modal'),
     closePlaylistModal: $('closePlaylistModal'),
     playlistForm: $('playlist-form'),
-    playlistServer: $('playlist-server'),
     playlistId: $('playlist-id'),
     playlistName: $('playlist-name'),
     playlistSave: $('playlist-save'),
@@ -91,7 +89,6 @@
   }
 
   const STORAGE = {
-    source: 'rmusic_source_v2',
     favorites: 'rmusic_favorites_v2',
     recent: 'rmusic_recent_v2',
     playlists: 'rmusic_playlists_v2',
@@ -169,7 +166,7 @@
 
   function normalizeTrack (track, server) {
     const out = { ...track }
-    out.server = track.server || server || els.server.value || 'netease'
+    out.server = track.server || server || 'netease'
     out.title = text(track.title, '未知歌曲')
     out.author = text(track.author, '未知艺人')
     out.album = text(track.album, '')
@@ -241,7 +238,7 @@
     return parsed?.message || body.slice(0, 180) || ('请求失败 (' + status + ')')
   }
 
-  async function fetchTracks (type, id, server) {
+  async function fetchTracks (type, id, server = 'aggregate') {
     const params = new URLSearchParams({ server, type, id: String(id) })
     const response = await fetch(API + '?' + params, { headers: { accept: 'application/json' } })
     if (!response.ok) {
@@ -289,25 +286,25 @@
     els.clearSearch.hidden = false
     showView('search')
     els.searchTitle.textContent = '“' + query + '”'
-    els.searchSummary.textContent = '正在从 ' + selectedSourceLabel() + ' 搜索歌曲与艺人。'
+    els.searchSummary.textContent = '正在聚合多个音乐平台，并按关键词相关度排序。'
     els.searchEmpty.hidden = true
     els.searchResultsWrap.hidden = true
     els.searchLoading.hidden = false
     const requestId = ++searchRequestId
     try {
-      const results = await fetchTracks('search', query, els.server.value)
+      const results = await fetchTracks('search', query)
       if (requestId !== searchRequestId) return
       state.searchResults = results
       renderTrackRows(els.searchResults, state.searchResults, '搜索：' + query)
       els.searchCount.textContent = state.searchResults.length + ' 首歌曲'
       els.searchSummary.textContent = state.searchResults.length
-        ? '来自 ' + selectedSourceLabel() + ' · 点击任意歌曲开始连续播放'
-        : '没有找到结果，试试更短的关键词或切换音源。'
+        ? '聚合搜索 · 已按相关度排序 · 点击任意歌曲开始连续播放'
+        : '没有找到结果，试试更短或更具体的关键词。'
       els.searchResultsWrap.hidden = state.searchResults.length === 0
       els.searchEmpty.hidden = state.searchResults.length !== 0
       if (state.searchResults.length === 0) {
         els.searchEmpty.querySelector('h2').textContent = '没有找到匹配歌曲'
-        els.searchEmpty.querySelector('p').textContent = '换个关键词，或者在右上角选择另一个音乐平台。'
+        els.searchEmpty.querySelector('p').textContent = '换个关键词，或者同时输入歌曲名和歌手名。'
       }
     } catch (error) {
       if (requestId !== searchRequestId) return
@@ -322,10 +319,6 @@
     }
   }
 
-  function selectedSourceLabel () {
-    return els.server.options[els.server.selectedIndex]?.textContent || els.server.value
-  }
-
   els.searchForm.addEventListener('submit', (event) => {
     event.preventDefault()
     runSearch()
@@ -335,10 +328,6 @@
     els.query.value = ''
     els.clearSearch.hidden = true
     els.query.focus()
-  })
-  els.server.addEventListener('change', () => {
-    try { localStorage.setItem(STORAGE.source, els.server.value) } catch {}
-    if (state.view === 'search' && els.query.value.trim()) runSearch()
   })
   $$('[data-discover]').forEach((button) => button.addEventListener('click', () => runSearch(button.dataset.discover)))
   els.playSearchResults.addEventListener('click', () => playFromList(state.searchResults, 0, '搜索结果'))
@@ -396,7 +385,7 @@
 
     const album = document.createElement('span')
     album.className = 'track-album'
-    album.textContent = track.album || track.server || 'RMusic'
+    album.textContent = [track.album, sourceName(track.server)].filter(Boolean).join(' · ') || 'RMusic'
 
     const like = document.createElement('button')
     like.type = 'button'
@@ -516,9 +505,43 @@
 
   function playlistKey (playlist) { return playlist.server + ':' + playlist.id }
 
+  function parsePlaylistInput (rawValue) {
+    const raw = rawValue.trim()
+    const inferred = { server: 'aggregate', id: raw }
+    if (!raw) return inferred
+    if (/^(?:PL|OLAK5uy_)/i.test(raw)) return { server: 'ytmusic', id: raw }
+    if (/^pl\./i.test(raw)) return { server: 'apple', id: raw }
+    if (!/^https?:\/\//i.test(raw)) return inferred
+    try {
+      const url = new URL(raw)
+      const host = url.hostname.toLowerCase()
+      if (host.includes('music.163.com') || host.endsWith('163cn.tv')) inferred.server = 'netease'
+      else if (host.includes('y.qq.com')) inferred.server = 'tencent'
+      else if (host.includes('kugou.com')) inferred.server = 'kugou'
+      else if (host.includes('kuwo.cn')) inferred.server = 'kuwo'
+      else if (host.includes('music.baidu.com')) inferred.server = 'baidu'
+      else if (host.includes('youtube.com') || host === 'youtu.be') inferred.server = 'ytmusic'
+      else if (host.includes('spotify.com')) inferred.server = 'spotify'
+      else if (host.includes('music.apple.com')) inferred.server = 'apple'
+      const pathParts = url.pathname.split('/').filter(Boolean)
+      const hashQuery = url.hash.includes('?') ? new URLSearchParams(url.hash.slice(url.hash.indexOf('?') + 1)) : null
+      inferred.id =
+        url.searchParams.get('id') ||
+        url.searchParams.get('list') ||
+        url.searchParams.get('playlistId') ||
+        url.searchParams.get('global_collection_id') ||
+        hashQuery?.get('id') ||
+        hashQuery?.get('list') ||
+        pathParts.at(-1) ||
+        raw
+      return inferred
+    } catch {
+      return inferred
+    }
+  }
+
   function openPlaylistModal () {
     els.playlistModal.hidden = false
-    els.playlistServer.value = els.server.value
     els.playlistFormError.hidden = true
     setTimeout(() => els.playlistId.focus(), 40)
   }
@@ -536,10 +559,11 @@
 
   els.playlistForm.addEventListener('submit', async (event) => {
     event.preventDefault()
+    const parsed = parsePlaylistInput(els.playlistId.value)
     const playlist = {
-      server: els.playlistServer.value,
-      id: els.playlistId.value.trim(),
-      name: els.playlistName.value.trim() || '歌单 ' + els.playlistId.value.trim()
+      server: parsed.server,
+      id: parsed.id,
+      name: els.playlistName.value.trim() || '歌单 ' + parsed.id
     }
     if (!playlist.id) return
     els.loadPlaylistButton.disabled = true
@@ -550,7 +574,7 @@
       closePlaylistModal()
       const loaded = await loadPlaylist(playlist)
       if (loaded && shouldSave) {
-        savePlaylistDefinition(playlist)
+        savePlaylistDefinition(loaded)
         renderLibrary()
         syncCollectionSaveButton()
         toast('歌单已保存到音乐库')
@@ -589,7 +613,7 @@
     if (!state.playlists.length) {
       const sidebarEmpty = document.createElement('div')
       sidebarEmpty.className = 'sidebar-empty'
-      sidebarEmpty.textContent = '点击 +，通过平台歌单 ID 添加。'
+      sidebarEmpty.textContent = '点击 +，粘贴歌单链接或输入 ID。'
       els.sidebarPlaylists.appendChild(sidebarEmpty)
       const empty = document.createElement('div')
       empty.className = 'library-empty'
@@ -634,7 +658,7 @@
   }
 
   function sourceName (server) {
-    const labels = { netease: '网易云', tencent: 'QQ 音乐', ytmusic: 'YouTube Music', kugou: '酷狗', kuwo: '酷我', baidu: '百度', spotify: 'Spotify', apple: 'Apple Music' }
+    const labels = { aggregate: '聚合', netease: '网易云', tencent: 'QQ 音乐', ytmusic: 'YouTube Music', kugou: '酷狗', kuwo: '酷我', baidu: '百度', spotify: 'Spotify', apple: 'Apple Music' }
     return labels[server] || server
   }
 
@@ -650,10 +674,11 @@
       const tracks = await fetchTracks('playlist', playlist.id, playlist.server)
       if (requestId !== collectionRequestId) return false
       collection.tracks = tracks
+      if (collection.server === 'aggregate' && tracks[0]?.server) collection.server = tracks[0].server
       renderCollectionHeader()
       renderTrackRows(els.collectionTracks, tracks, playlist.name)
       if (!tracks.length) toast('歌单没有返回曲目', 'error')
-      return true
+      return collection
     } catch (error) {
       if (requestId !== collectionRequestId) return false
       const empty = document.createElement('div')
@@ -737,7 +762,7 @@
       state.consecutiveErrors += 1
       if (state.consecutiveErrors >= 3) {
         state.consecutiveErrors = 0
-        toast('连续多首歌曲没有可用地址，请切换音源', 'error')
+        toast('连续多首歌曲没有可用地址，请稍后重试', 'error')
       } else {
         toast('当前歌曲没有可用地址，正在跳到下一首', 'error')
         pendingSkipTimer = setTimeout(() => advance(1), 850)
@@ -964,12 +989,12 @@
     if (!els.audio.src) return
     state.consecutiveErrors += 1
     if (state.repeat === 'single') {
-      toast('当前歌曲加载失败，请切换歌曲', 'error')
+      toast('当前歌曲加载失败，请选择其他歌曲', 'error')
       return
     }
     if (state.consecutiveErrors >= 3) {
       state.consecutiveErrors = 0
-      toast('连续多首歌曲不可播放，请切换音源', 'error')
+      toast('连续多首歌曲不可播放，请稍后重试', 'error')
       return
     }
     toast('当前歌曲不可播放，正在跳到下一首', 'error')
@@ -1277,10 +1302,6 @@
   /* ---------- Boot ---------- */
 
   function boot () {
-    const savedSource = readStorage(STORAGE.source)
-    if (savedSource && Array.from(els.server.options).some((option) => option.value === savedSource)) els.server.value = savedSource
-    els.playlistServer.value = els.server.value
-
     const modes = readJson(STORAGE.modes, {})
     if (modes.shuffle === 'on') state.shuffle = 'on'
     if (['off', 'all', 'single'].includes(modes.loop)) state.repeat = modes.loop
@@ -1298,12 +1319,11 @@
     const url = new URL(location.href)
     const type = url.searchParams.get('type')
     const id = url.searchParams.get('id')
-    const server = url.searchParams.get('server') || els.server.value
+    const server = url.searchParams.get('server') || 'aggregate'
     if (type === 'playlist' && id) {
       const playlist = { server, id, name: url.searchParams.get('name') || ('歌单 ' + id) }
       loadPlaylist(playlist).catch((error) => toast(error.message, 'error'))
     } else if (url.searchParams.get('q')) {
-      els.server.value = server
       runSearch(url.searchParams.get('q'))
     } else {
       showView('home')

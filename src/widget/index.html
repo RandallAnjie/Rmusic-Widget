@@ -82,20 +82,6 @@
           </button>
         </form>
 
-        <label class="source-picker">
-          <span>音源</span>
-          <select id="server" aria-label="音乐平台">
-            <option value="netease" selected>网易云</option>
-            <option value="tencent">QQ 音乐</option>
-            <option value="ytmusic">YouTube Music</option>
-            <option value="kugou">酷狗</option>
-            <option value="kuwo">酷我</option>
-            <option value="baidu">百度</option>
-            <option value="spotify">Spotify</option>
-            <option value="apple">Apple Music</option>
-          </select>
-        </label>
-
         <div class="topbar-actions">
           <button class="icon-button panel-trigger" type="button" data-panel="lyrics" title="歌词" aria-label="打开歌词">
             <svg class="icon"><use href="#i-mic"></use></svg>
@@ -164,7 +150,7 @@
           <div class="page-heading">
             <p class="eyebrow">跨平台检索</p>
             <h1 id="search-title">搜索音乐</h1>
-            <p id="search-summary">选择右上角音源，然后搜索歌曲、歌手或专辑关键词。</p>
+            <p id="search-summary">搜索会自动聚合多个音乐平台，并按关键词相关度排序。</p>
           </div>
           <div id="search-empty" class="empty-state">
             <span class="empty-icon"><svg class="icon"><use href="#i-search"></use></svg></span>
@@ -295,11 +281,10 @@
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="playlist-modal-title">
       <div class="modal-header"><div><p class="eyebrow">添加到音乐库</p><h2 id="playlist-modal-title">载入在线歌单</h2></div><button class="icon-button" id="closePlaylistModal" type="button" aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></div>
       <form id="playlist-form">
-        <label><span>音乐平台</span><select id="playlist-server"><option value="netease">网易云</option><option value="tencent">QQ 音乐</option><option value="kugou">酷狗</option><option value="kuwo">酷我</option><option value="baidu">百度</option><option value="ytmusic">YouTube Music</option><option value="spotify">Spotify</option><option value="apple">Apple Music</option></select></label>
-        <label><span>歌单 ID</span><input id="playlist-id" required placeholder="例如 3778678" autocomplete="off" /></label>
+        <label><span>歌单链接或 ID</span><input id="playlist-id" required placeholder="粘贴分享链接，或输入 3778678" autocomplete="off" /></label>
         <label><span>显示名称 <small>可选</small></span><input id="playlist-name" placeholder="我的歌单" autocomplete="off" /></label>
         <label class="check-row"><input id="playlist-save" type="checkbox" checked /><span>保存到本机音乐库</span></label>
-        <p class="form-note">歌单只保存平台、ID 和名称，曲目每次打开时实时获取。</p>
+        <p class="form-note">RMusic 会从分享链接识别平台；仅输入 ID 时自动尝试可用平台。曲目每次打开时实时获取。</p>
         <div id="playlist-form-error" class="form-error" hidden></div>
         <button class="primary-button full-button" id="loadPlaylistButton" type="submit">载入歌单</button>
       </form>
