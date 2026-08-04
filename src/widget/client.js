@@ -107,8 +107,8 @@
     queueIndex: -1,
     queueLabel: '',
     currentTrack: null,
-    favorites: readJson(STORAGE.favorites, []),
-    recent: readJson(STORAGE.recent, []),
+    favorites: normalizeList(readJson(STORAGE.favorites, [])),
+    recent: normalizeList(readJson(STORAGE.recent, [])),
     playlists: readJson(STORAGE.playlists, []),
     shuffle: 'off',
     repeat: 'off',
@@ -150,7 +150,21 @@
 
   function trackKey (track) {
     if (!track) return ''
+    if (track.id) return [track.server || '', String(track.id)].join('|')
     return [track.server || '', track.id || '', track.url || '', track.title || '', track.author || ''].join('|')
+  }
+
+  function audioUrlWithHints (value, track) {
+    if (!value || track.server !== 'tencent') return value
+    try {
+      const parsed = new URL(value, location.href)
+      if (parsed.origin !== location.origin || parsed.pathname !== API) return value
+      if (!parsed.searchParams.get('title') && track.title) parsed.searchParams.set('title', track.title.slice(0, 160))
+      if (!parsed.searchParams.get('author') && track.author) parsed.searchParams.set('author', track.author.slice(0, 160))
+      return parsed.pathname + '?' + parsed.searchParams.toString()
+    } catch {
+      return value
+    }
   }
 
   function normalizeTrack (track, server) {
@@ -159,7 +173,7 @@
     out.title = text(track.title, '未知歌曲')
     out.author = text(track.author, '未知艺人')
     out.album = text(track.album, '')
-    out.url = text(track.url, '')
+    out.url = audioUrlWithHints(text(track.url, ''), out)
     out.pic = text(track.pic, '')
     out.lrc = text(track.lrc, '')
     out.lrcpword = text(track.lrcpword, '')
@@ -707,6 +721,7 @@
   function playQueueIndex (index) {
     const track = state.queue[index]
     if (!track) return
+    track.url = audioUrlWithHints(track.url, track)
     clearTimeout(pendingSkipTimer)
     state.queueIndex = index
     state.currentTrack = track

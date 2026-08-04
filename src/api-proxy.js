@@ -18,6 +18,11 @@
 // Meting-API decided to serve.
 
 const WIDGET_REWRITTEN_PATH = '/api/proxy'
+// NetEase is first because its audio resolver is generally faster and
+// does not depend on YouTube's bot challenge. YouTube Music remains a
+// second chance for exact official matches when its player session is
+// healthy.
+const AUDIO_FALLBACK_SERVERS = ['netease', 'ytmusic']
 
 export async function callUpstream (config, type, params, init = {}) {
   const usp = new URLSearchParams()
@@ -70,11 +75,14 @@ function streamInit (request) {
  * `url.origin === http://...-internal-...` mess that bigrandall's
  * edge layer creates — whatever protocol the visitor came in on,
  * a relative URL stays on that protocol with no inference needed.
- * Only carries server/type/id — auth and token get re-minted server-
- * side on the next round-trip.
+ * Only carries server/type/id plus non-sensitive title/author hints
+ * for audio recovery — auth and token get re-minted server-side on
+ * the next round-trip.
  */
-function publicProxyUrl (server, type, id) {
+function publicProxyUrl (server, type, id, hints = {}) {
   const usp = new URLSearchParams({ server, type, id: String(id) })
+  if (hints.title) usp.set('title', String(hints.title).slice(0, 160))
+  if (hints.author) usp.set('author', String(hints.author).slice(0, 160))
   return `${WIDGET_REWRITTEN_PATH}?${usp}`
 }
 
@@ -106,7 +114,9 @@ function rewriteTrackList (tracks, server) {
     const out = {
       ...t,
       server,
-      url: urlId ? publicProxyUrl(server, 'url', urlId) : '',
+      url: urlId
+        ? publicProxyUrl(server, 'url', urlId, server === 'tencent' ? { title: t.title, author: t.author } : {})
+        : '',
       pic: picId ? publicProxyUrl(server, 'pic', picId) : '',
       lrc: lrcId ? publicProxyUrl(server, 'lrc', lrcId) : ''
     }
@@ -128,13 +138,124 @@ function pickIdFromUrl (u) {
   }
 }
 
+function normaliseMatchText (value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+function editDistance (left, right, limit = 2) {
+  const a = Array.from(left)
+  const b = Array.from(right)
+  if (Math.abs(a.length - b.length) > limit) return limit + 1
+  let previous = b.map((_, index) => index + 1)
+  previous.unshift(0)
+  for (let row = 1; row <= a.length; row++) {
+    const current = [row]
+    let rowMinimum = row
+    for (let column = 1; column <= b.length; column++) {
+      const value = Math.min(
+        current[column - 1] + 1,
+        previous[column] + 1,
+        previous[column - 1] + (a[row - 1] === b[column - 1] ? 0 : 1)
+      )
+      current.push(value)
+      rowMinimum = Math.min(rowMinimum, value)
+    }
+    if (rowMinimum > limit) return limit + 1
+    previous = current
+  }
+  return previous[b.length]
+}
+
+function authorMatchScore (candidate, wanted) {
+  if (!wanted) return 0
+  if (candidate === wanted) return 6
+  // Cross-platform metadata frequently differs only by one or two
+  // simplified/traditional glyphs (周杰伦 / 周杰倫). A bounded edit
+  // distance accepts that without accepting polluted artist strings
+  // such as "周杰伦 / DJ Foo" merely because they contain the name.
+  if (candidate && editDistance(candidate, wanted, 2) <= 2) return 4
+  if (
+    candidate &&
+    Math.abs(candidate.length - wanted.length) <= 2 &&
+    (candidate.includes(wanted) || wanted.includes(candidate))
+  ) return 3
+  return -4
+}
+
+function pickFallbackTrack (tracks, title, author) {
+  if (!Array.isArray(tracks)) return null
+  const wantedTitle = normaliseMatchText(title)
+  const wantedAuthor = normaliseMatchText(author)
+  if (!wantedTitle) return null
+
+  let best = null
+  let bestScore = -Infinity
+  for (const track of tracks) {
+    const candidateId = pickIdFromUrl(track?.url)
+    const candidateTitle = normaliseMatchText(track?.title)
+    const candidateAuthor = normaliseMatchText(track?.author)
+    if (!candidateId || !candidateTitle) continue
+
+    let score
+    if (candidateTitle === wantedTitle) score = 8
+    else if (candidateTitle.includes(wantedTitle) || wantedTitle.includes(candidateTitle)) score = 3
+    else continue
+
+    score += authorMatchScore(candidateAuthor, wantedAuthor)
+    if (score > bestScore) {
+      bestScore = score
+      best = { id: candidateId, track }
+    }
+  }
+
+  // Exact title alone scores 8. Partial-title matches must also have
+  // an author match to cross the threshold. This deliberately
+  // prefers returning the original 403 over playing a same-name song
+  // by the wrong artist.
+  return bestScore >= 8 ? best : null
+}
+
+async function resolveAudioFallback (request, config, { title, author }) {
+  const query = [title, author].filter(Boolean).join(' ').trim()
+  if (!query) return null
+
+  for (const server of AUDIO_FALLBACK_SERVERS) {
+    try {
+      const search = await callUpstream(
+        config,
+        'search',
+        { server, id: query },
+        { method: 'GET', redirect: 'manual' }
+      )
+      if (!search.ok) continue
+      const match = pickFallbackTrack(await search.json(), title, author)
+      if (!match) continue
+      const audio = await callUpstream(
+        config,
+        'url',
+        { server, id: match.id },
+        streamInit(request)
+      )
+      if (audio.ok) return { upstream: audio, server, id: match.id }
+    } catch {
+      // A fallback is best-effort. Preserve the original Tencent
+      // response when a search, parse or alternate audio request
+      // fails instead of replacing it with a less useful error.
+    }
+  }
+  return null
+}
+
 /**
  * Main entry called by the worker for /api/proxy?server=X&type=Y&id=Z.
  * Handles protected types (url/pic/lrcpword), public lrc, and metadata types
  * (search/song/album/artist/playlist) the same way: forward, decorate.
  */
 export async function proxyApi (request, config, params) {
-  const { server, type, id, r } = params
+  const { server, type, id, r, title, author } = params
   const upstream = await callUpstream(
     config,
     type,
@@ -146,17 +267,29 @@ export async function proxyApi (request, config, params) {
   // 4xx) preserved, and only the headers a player actually needs
   // copied over. Body is the upstream ReadableStream, no buffering.
   if (type === 'url') {
+    let audioUpstream = upstream
+    let fallback = null
+    if (server === 'tencent' && (upstream.status === 403 || upstream.status === 404)) {
+      fallback = await resolveAudioFallback(request, config, { title, author })
+      if (fallback) audioUpstream = fallback.upstream
+    }
     const out = new Headers()
-    copyHeader(upstream.headers, out, 'content-type')
-    copyHeader(upstream.headers, out, 'content-length')
-    copyHeader(upstream.headers, out, 'content-range')
-    copyHeader(upstream.headers, out, 'accept-ranges')
+    copyHeader(audioUpstream.headers, out, 'content-type')
+    copyHeader(audioUpstream.headers, out, 'content-length')
+    copyHeader(audioUpstream.headers, out, 'content-range')
+    copyHeader(audioUpstream.headers, out, 'accept-ranges')
     if (!out.has('accept-ranges')) out.set('accept-ranges', 'bytes')
     if (!out.has('content-type')) out.set('content-type', 'audio/mpeg')
-    // Short cache so a viral row is deduped at the CDN layer but not
-    // long enough to outlast any upstream signed-URL expiry.
-    out.set('cache-control', 'public, max-age=300')
-    return new Response(upstream.body, { status: upstream.status, headers: out })
+    if (fallback) {
+      out.set('x-rmusic-fallback', fallback.server)
+      out.set('x-rmusic-original-server', server)
+    }
+    // Successful streams get a short edge cache. Never cache a
+    // Tencent vkey rejection: the operator may rotate the cookie at
+    // any moment, and a cached 403 would keep playback broken after
+    // the upstream session is healthy again.
+    out.set('cache-control', audioUpstream.ok ? 'public, max-age=300' : 'no-store')
+    return new Response(audioUpstream.body, { status: audioUpstream.status, headers: out })
   }
 
   // Pic path: Meting-API answers 302 to a CDN image. Pass the

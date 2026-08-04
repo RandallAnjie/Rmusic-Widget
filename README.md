@@ -9,6 +9,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 喜欢的歌曲、最近播放和保存的在线歌单
 - 桌面端三栏布局；移动端单行播放器、横向卡片、安全区和横屏适配
 - 页面、列表、弹层和播放状态统一使用 `cubic-bezier()` 动效曲线
+- Tencent vkey 拒绝时按歌曲名与歌手自动回退网易云 / YouTube Music
 - OS 锁屏 / 蓝牙耳机 / 系统媒体控件（Media Session）
 
 所有收藏数据只保存在浏览器 `localStorage`。在线歌单仅保存平台、歌单 ID 与名称，打开时实时请求最新曲目。
@@ -19,7 +20,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 1. Worker 在服务端注入 `MUSIC_API_TOKEN`；浏览器永远看不到 master token。
 2. Meting-API 返回的 `url` / `pic` / `lrc` / `lrcpword` 会重写成本站代理 URL。
-3. 音频 Range、封面和歌词均通过代理返回；上游错误状态保持不变。
+3. 音频 Range、封面和歌词均通过代理返回；上游错误状态保持不变，只有 Tencent `403/404` 音频会进行严格同曲回退。
 4. 每 IP、每 isolate 有滑动窗口限流，默认 `180` 次/分钟。
 
 ## 路由
@@ -37,6 +38,12 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 /?q=Lemon&server=netease
 /?type=playlist&server=tencent&id=9505357778&name=My%20Playlist
 ```
+
+### Tencent 音频回退
+
+QQ 音乐可能因为会员权益、cookie 状态或 Worker 出口地域限制拒绝全部 vkey。RMusic 为生成的 Tencent 音频 URL 附加非敏感的歌曲名和歌手提示；遇到 `403/404` 时，代理依次搜索网易云和 YouTube Music，只有标题精确匹配（或标题部分匹配且歌手匹配）才返回替代音频。歌手比较允许很小的简繁体字形差异，但不会接受仅仅包含原歌手名字的混合改编结果。
+
+成功回退的响应包含 `X-RMusic-Fallback` 和 `X-RMusic-Original-Server`。无法可靠匹配时仍返回原始 Tencent 错误，避免播放错误的同名歌曲。失败响应使用 `Cache-Control: no-store`，刷新 cookie 后不会继续命中旧 403。
 
 ## 环境变量与绑定
 
