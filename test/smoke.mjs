@@ -27,6 +27,13 @@ const env = {
       const type = url.searchParams.get('type')
       const server = url.searchParams.get('server')
       if (['search', 'playlist'].includes(type)) {
+        if (type === 'search' && url.searchParams.get('id') === 'Night Drive') {
+          if (server === 'netease') return Response.json(fixture)
+          if (server === 'tencent') return Response.json([{ ...fixture[0], title: 'Night Drive (Live)', url: 'https://music.example/api?server=tencent&type=url&id=live-1' }])
+          if (server === 'kugou') return Response.json([{ ...fixture[0], title: 'Drive', author: 'Night', url: 'https://music.example/api?server=kugou&type=url&id=loose-1' }])
+          if (server === 'spotify') return Response.json({ error: true }, { status: 403 })
+          return Response.json([])
+        }
         if (url.searchParams.get('id') === '晴天 周杰伦') return Response.json(traditionalFixture)
         if (url.searchParams.get('id') === 'Unsafe Artist') return Response.json(pollutedFixture)
         return Response.json(fixture)
@@ -73,6 +80,8 @@ assert.match(sourceCss, /@media \(max-width: 900px\)/)
 assert.match(sourceCss, /@media \(max-width: 780px\)/)
 assert.match(sourceCss, /env\(safe-area-inset-bottom\)/)
 assert.match(sourceCss, /@keyframes mobile-player-enter/)
+assert.doesNotMatch(sourceHtml, /id="server"/)
+assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
 const motionDeclarations = sourceCss.match(/\b(?:animation|transition)\s*:[^;]+;/g) || []
 for (const declaration of motionDeclarations) {
   assert.match(declaration, /var\(--curve-|cubic-bezier\(|:\s*none/, `motion must use a cubic-bezier curve: ${declaration}`)
@@ -102,6 +111,25 @@ assert.equal(calls.at(-1).url.searchParams.get('token'), 'server-only-secret')
 const tencentSearch = await request('/api/proxy?server=tencent&type=search&id=night')
 const [tencentTrack] = await tencentSearch.json()
 assert.equal(tencentTrack.url, '/api/proxy?server=tencent&type=url&id=audio-1&title=Night+Drive&author=RMusic')
+
+const aggregateCallStart = calls.length
+const aggregateSearch = await request('/api/proxy?type=search&id=Night%20Drive')
+assert.equal(aggregateSearch.status, 200)
+assert.match(aggregateSearch.headers.get('x-rmusic-sources'), /tencent/)
+assert.match(aggregateSearch.headers.get('x-rmusic-sources'), /netease/)
+assert.doesNotMatch(aggregateSearch.headers.get('x-rmusic-sources'), /spotify/)
+const aggregateTracks = await aggregateSearch.json()
+assert.equal(aggregateTracks[0].title, 'Night Drive')
+assert.equal(aggregateTracks[0].server, 'netease')
+assert.equal(aggregateTracks[1].title, 'Night Drive (Live)')
+const aggregateCalls = calls.slice(aggregateCallStart)
+assert.ok(aggregateCalls.length >= 8)
+assert.ok(aggregateCalls.every(({ url }) => url.searchParams.get('token') === 'server-only-secret'))
+
+const aggregatePlaylist = await request('/api/proxy?server=aggregate&type=playlist&id=3778678')
+assert.equal(aggregatePlaylist.status, 200)
+assert.equal(aggregatePlaylist.headers.get('x-rmusic-sources'), 'netease')
+assert.equal((await aggregatePlaylist.json())[0].server, 'netease')
 
 const lyrics = await request(track.lrcpword)
 assert.equal(lyrics.status, 200)

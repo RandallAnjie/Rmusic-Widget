@@ -18,6 +18,10 @@
 // Meting-API decided to serve.
 
 const WIDGET_REWRITTEN_PATH = '/api/proxy'
+const AGGREGATE_SEARCH_SERVERS = ['tencent', 'netease', 'kugou', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']
+const AGGREGATE_PLAYLIST_SERVERS = ['netease', 'tencent', 'kugou', 'kuwo', 'ytmusic', 'baidu', 'apple', 'spotify']
+const AGGREGATE_TIMEOUT_MS = 5000
+const AGGREGATE_RESULT_LIMIT = 80
 // NetEase is first because its audio resolver is generally faster and
 // does not depend on YouTube's bot challenge. YouTube Music remains a
 // second chance for exact official matches when its player session is
@@ -169,6 +173,149 @@ function editDistance (left, right, limit = 2) {
   return previous[b.length]
 }
 
+function searchTokens (value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function fieldMatchScore (field, wanted) {
+  if (!field || !wanted) return 0
+  if (field === wanted) return 120
+  if (wanted.length >= 3 && editDistance(field, wanted, 2) <= 2) return 105
+  if (field.startsWith(wanted)) return 82
+  if (field.includes(wanted)) return 68
+  if (wanted.includes(field) && field.length >= 2) return 48
+  return 0
+}
+
+function aggregateRelevance (track, query, sourceIndex, rowIndex) {
+  const wanted = normaliseMatchText(query)
+  const title = normaliseMatchText(track.title)
+  const author = normaliseMatchText(track.author)
+  const album = normaliseMatchText(track.album)
+  const combined = title + author + album
+  let score = fieldMatchScore(title, wanted) * 3
+  score += fieldMatchScore(author, wanted) * 2
+  score += fieldMatchScore(album, wanted)
+  if (wanted && combined.includes(wanted)) score += 110
+
+  for (const token of searchTokens(query)) {
+    const normalised = normaliseMatchText(token)
+    score += Math.max(
+      fieldMatchScore(title, normalised) * 1.5,
+      fieldMatchScore(author, normalised) * 1.2,
+      fieldMatchScore(album, normalised) * 0.55
+    )
+  }
+
+  // Platform order only breaks otherwise equal matches. The original
+  // provider rank matters more, but never enough to put a fuzzy result
+  // above an exact title/artist hit.
+  score -= rowIndex * 0.35
+  score -= sourceIndex * 0.02
+  return score
+}
+
+function rankAggregateTracks (groups, query) {
+  const ranked = []
+  groups.forEach(({ rows }, sourceIndex) => {
+    rows.forEach((track, rowIndex) => {
+      if (!track?.url || !normaliseMatchText(track.title)) return
+      ranked.push({
+        track,
+        score: aggregateRelevance(track, query, sourceIndex, rowIndex),
+        sourceIndex,
+        rowIndex
+      })
+    })
+  })
+  ranked.sort((left, right) =>
+    right.score - left.score ||
+    left.rowIndex - right.rowIndex ||
+    left.sourceIndex - right.sourceIndex
+  )
+
+  // Collapse exact title+artist duplicates across services. Entries
+  // without an artist keep their source-specific identity so unrelated
+  // same-title instrumentals are not accidentally merged.
+  const seen = new Set()
+  const output = []
+  for (const item of ranked) {
+    const title = normaliseMatchText(item.track.title)
+    const author = normaliseMatchText(item.track.author)
+    const key = author ? `${title}|${author}` : `${item.track.server}|${item.track.url}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    output.push(item.track)
+    if (output.length >= AGGREGATE_RESULT_LIMIT) break
+  }
+  return output
+}
+
+async function fetchAggregateSource (config, server, type, id) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), AGGREGATE_TIMEOUT_MS)
+  try {
+    const response = await callUpstream(
+      config,
+      type,
+      { server, id },
+      { method: 'GET', redirect: 'manual', signal: controller.signal }
+    )
+    if (!response.ok) return { server, ok: false, rows: [] }
+    const payload = await response.json()
+    if (!Array.isArray(payload)) return { server, ok: false, rows: [] }
+    const valid = payload.filter((track) => track && typeof track === 'object')
+    return { server, ok: true, rows: rewriteTrackList(valid, server) }
+  } catch {
+    return { server, ok: false, rows: [] }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function aggregateMetadata (config, type, id) {
+  if (type !== 'search' && type !== 'playlist') {
+    return Response.json(
+      { error: true, status: 400, message: `aggregate 不支持 type=${type}` },
+      { status: 400 }
+    )
+  }
+  const servers = type === 'search' ? AGGREGATE_SEARCH_SERVERS : AGGREGATE_PLAYLIST_SERVERS
+  const results = await Promise.all(servers.map((server) => fetchAggregateSource(config, server, type, id)))
+  const healthy = results.filter((result) => result.ok)
+  if (!healthy.length) {
+    return Response.json(
+      { error: true, status: 502, message: '聚合搜索暂时不可用，所有音乐平台均请求失败' },
+      { status: 502, headers: { 'cache-control': 'no-store' } }
+    )
+  }
+
+  let rows
+  let usedSources
+  if (type === 'search') {
+    rows = rankAggregateTracks(healthy, id)
+    usedSources = healthy.map((result) => result.server)
+  } else {
+    const selected = healthy.find((result) => result.rows.length)
+    rows = selected?.rows || []
+    usedSources = selected ? [selected.server] : healthy.map((result) => result.server)
+  }
+  return new Response(JSON.stringify(rows), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': type === 'search' ? 'public, max-age=45' : 'public, max-age=300',
+      'x-rmusic-sources': usedSources.join(',')
+    }
+  })
+}
+
 function authorMatchScore (candidate, wanted) {
   if (!wanted) return 0
   if (candidate === wanted) return 6
@@ -256,6 +403,7 @@ async function resolveAudioFallback (request, config, { title, author }) {
  */
 export async function proxyApi (request, config, params) {
   const { server, type, id, r, title, author } = params
+  if (server === 'aggregate') return aggregateMetadata(config, type, id)
   const upstream = await callUpstream(
     config,
     type,
