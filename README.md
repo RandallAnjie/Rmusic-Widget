@@ -7,7 +7,8 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 队列、随机播放、列表/单曲循环、进度和音量控制
 - 标准 LRC + Enhanced LRC 逐字歌词
 - 喜欢的歌曲、最近播放和保存的在线歌单
-- 桌面端三栏布局，移动端底部导航和紧凑播放器
+- 桌面端三栏布局；移动端单行播放器、横向卡片、安全区和横屏适配
+- 页面、列表、弹层和播放状态统一使用 `cubic-bezier()` 动效曲线
 - OS 锁屏 / 蓝牙耳机 / 系统媒体控件（Media Session）
 
 所有收藏数据只保存在浏览器 `localStorage`。在线歌单仅保存平台、歌单 ID 与名称，打开时实时请求最新曲目。

@@ -16,6 +16,7 @@
   const els = {
     app: $('app'),
     audio: $('audio'),
+    player: $('player'),
     ambient: $('ambient'),
     searchForm: $('global-search'),
     query: $('query'),
@@ -248,7 +249,7 @@
     })
     $$('[data-nav]').forEach((button) => button.classList.toggle('active', button.dataset.nav === target))
     const scroll = document.querySelector('.content-scroll')
-    if (scroll) scroll.scrollTo({ top: 0, behavior: 'smooth' })
+    if (scroll) scroll.scrollTop = 0
     if (target === 'home') renderHome()
     if (target === 'library') renderLibrary()
     if (target === 'search') setTimeout(() => els.query.focus(), 80)
@@ -350,6 +351,7 @@
     const row = document.createElement('div')
     row.className = 'track-row'
     row.dataset.trackKey = trackKey(track)
+    row.style.setProperty('--item-index', String(Math.min(index, 12)))
 
     const number = document.createElement('div')
     number.className = 'track-number'
@@ -411,6 +413,7 @@
       const card = document.createElement('article')
       card.className = 'music-card'
       card.tabIndex = 0
+      card.style.setProperty('--item-index', String(index))
       const cover = createCover(track, 'card-cover')
       const button = document.createElement('button')
       button.type = 'button'
@@ -580,7 +583,7 @@
       els.savedPlaylists.appendChild(empty)
       return
     }
-    state.playlists.forEach((playlist) => {
+    state.playlists.forEach((playlist, playlistIndex) => {
       const side = document.createElement('button')
       side.type = 'button'
       side.className = 'sidebar-playlist'
@@ -592,6 +595,7 @@
       const card = document.createElement('article')
       card.className = 'playlist-card'
       card.tabIndex = 0
+      card.style.setProperty('--item-index', String(Math.min(playlistIndex, 10)))
       const art = document.createElement('div')
       art.className = 'playlist-art'
       art.textContent = initials(playlist.name)
@@ -757,6 +761,8 @@
     }
     syncFavoriteButtons()
     updateMediaSession(track)
+    els.player.classList.remove('track-changed')
+    requestAnimationFrame(() => els.player.classList.add('track-changed'))
   }
 
   function updateTransportEnabled () {
@@ -860,9 +866,10 @@
       els.queueList.appendChild(empty)
       return
     }
-    upcoming.forEach(({ track, index }) => {
+    upcoming.forEach(({ track, index }, order) => {
       const row = document.createElement('div')
       row.className = 'queue-row'
+      row.style.setProperty('--item-index', String(Math.min(order, 10)))
       row.appendChild(createCover(track, 'row-cover'))
       row.appendChild(createTrackCopy(track))
       row.addEventListener('click', () => playQueueIndex(index))
@@ -924,8 +931,8 @@
 
   /* ---------- Audio events and progress ---------- */
 
-  els.audio.addEventListener('play', () => { setLoading(state.loadingAudio); updatePlayIcon(); setMediaPlaybackState('playing') })
-  els.audio.addEventListener('pause', () => { updatePlayIcon(); setMediaPlaybackState('paused') })
+  els.audio.addEventListener('play', () => { els.player.classList.add('is-playing'); setLoading(state.loadingAudio); updatePlayIcon(); setMediaPlaybackState('playing') })
+  els.audio.addEventListener('pause', () => { els.player.classList.remove('is-playing'); updatePlayIcon(); setMediaPlaybackState('paused') })
   els.audio.addEventListener('loadstart', () => setLoading(true))
   els.audio.addEventListener('waiting', () => setLoading(true))
   els.audio.addEventListener('canplay', () => setLoading(false))
@@ -936,6 +943,7 @@
     if (index >= 0) playQueueIndex(index)
   })
   els.audio.addEventListener('error', () => {
+    els.player.classList.remove('is-playing')
     setLoading(false)
     setMediaPlaybackState('none')
     if (!els.audio.src) return
@@ -1012,6 +1020,9 @@
   })
   els.audio.addEventListener('durationchange', () => { updateProgress(); updateMediaPosition() })
   els.audio.addEventListener('progress', updateBuffered)
+  els.player.addEventListener('animationend', (event) => {
+    if (event.animationName === 'cover-swap') els.player.classList.remove('track-changed')
+  })
 
   function maybePrewarmNext () {
     const duration = els.audio.duration || 0

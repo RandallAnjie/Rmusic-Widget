@@ -62,7 +62,14 @@ assert.equal(new Set(htmlIds).size, htmlIds.length, 'HTML must not contain dupli
 const referencedIds = [...clientSource.matchAll(/(?<!\$)\$\('([^']+)'\)/g)].map((match) => match[1])
 for (const id of referencedIds) assert.ok(htmlIds.includes(id), `client references missing #${id}`)
 assert.match(sourceCss, /@media \(max-width: 900px\)/)
-assert.match(sourceCss, /@media \(max-width: 720px\)/)
+assert.match(sourceCss, /@media \(max-width: 780px\)/)
+assert.match(sourceCss, /env\(safe-area-inset-bottom\)/)
+assert.match(sourceCss, /@keyframes mobile-player-enter/)
+const motionDeclarations = sourceCss.match(/\b(?:animation|transition)\s*:[^;]+;/g) || []
+for (const declaration of motionDeclarations) {
+  assert.match(declaration, /var\(--curve-|cubic-bezier\(|:\s*none/, `motion must use a cubic-bezier curve: ${declaration}`)
+  assert.doesNotMatch(declaration, /\b(?:ease|ease-in|ease-out|ease-in-out|linear)\b/, `motion must not use a timing keyword: ${declaration}`)
+}
 
 const css = await request('/widget.css')
 assert.match(css.headers.get('content-type'), /text\/css/)
