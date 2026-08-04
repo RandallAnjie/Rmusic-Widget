@@ -19,8 +19,9 @@
 
 const WIDGET_REWRITTEN_PATH = '/api/proxy'
 const AGGREGATE_SEARCH_SERVERS = ['tencent', 'netease', 'kugou', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']
-const AGGREGATE_PLAYLIST_SERVERS = ['netease', 'tencent', 'kugou', 'kuwo', 'ytmusic', 'baidu', 'apple', 'spotify']
-const AGGREGATE_TIMEOUT_MS = 5000
+const AGGREGATE_PLAYLIST_SERVERS = ['netease', 'tencent', 'kugou', 'ytmusic']
+const AGGREGATE_SEARCH_TIMEOUT_MS = 5000
+const AGGREGATE_PLAYLIST_TIMEOUT_MS = 9000
 const AGGREGATE_RESULT_LIMIT = 80
 // NetEase is first because its audio resolver is generally faster and
 // does not depend on YouTube's bot challenge. YouTube Music remains a
@@ -257,9 +258,9 @@ function rankAggregateTracks (groups, query) {
   return output
 }
 
-async function fetchAggregateSource (config, server, type, id) {
+async function fetchAggregateSource (config, server, type, id, timeoutMs) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), AGGREGATE_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await callUpstream(
       config,
@@ -271,7 +272,10 @@ async function fetchAggregateSource (config, server, type, id) {
     const payload = await response.json()
     if (!Array.isArray(payload)) return { server, ok: false, rows: [] }
     const valid = payload.filter((track) => track && typeof track === 'object')
-    return { server, ok: true, rows: rewriteTrackList(valid, server) }
+    const rows = rewriteTrackList(valid, server).filter((track) =>
+      track.url && normaliseMatchText(track.title)
+    )
+    return { server, ok: true, rows }
   } catch {
     return { server, ok: false, rows: [] }
   } finally {
@@ -287,11 +291,12 @@ async function aggregateMetadata (config, type, id) {
     )
   }
   const servers = type === 'search' ? AGGREGATE_SEARCH_SERVERS : AGGREGATE_PLAYLIST_SERVERS
-  const results = await Promise.all(servers.map((server) => fetchAggregateSource(config, server, type, id)))
+  const timeoutMs = type === 'search' ? AGGREGATE_SEARCH_TIMEOUT_MS : AGGREGATE_PLAYLIST_TIMEOUT_MS
+  const results = await Promise.all(servers.map((server) => fetchAggregateSource(config, server, type, id, timeoutMs)))
   const healthy = results.filter((result) => result.ok)
   if (!healthy.length) {
     return Response.json(
-      { error: true, status: 502, message: '聚合搜索暂时不可用，所有音乐平台均请求失败' },
+      { error: true, status: 502, message: '聚合请求暂时不可用，所有音乐平台均请求失败' },
       { status: 502, headers: { 'cache-control': 'no-store' } }
     )
   }
