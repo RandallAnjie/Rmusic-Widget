@@ -12,6 +12,8 @@
   const $ = (id) => document.getElementById(id)
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector))
   const API = '/api/proxy'
+  const SEARCH_SERVERS = ['netease', 'kugou', 'apple', 'ytmusic', 'tencent', 'kuwo', 'baidu']
+  const SEARCH_SOURCE_TIMEOUT_MS = 5000
 
   const els = {
     app: $('app'),
@@ -150,6 +152,7 @@
   let lrcData = []
   let lastLrcIndex = -1
   let searchRequestId = 0
+  let activeSearchControllers = []
   let collectionRequestId = 0
   let lyricsRequestId = 0
 
@@ -268,14 +271,152 @@
     return parsed?.message || body.slice(0, 180) || ('请求失败 (' + status + ')')
   }
 
-  async function fetchTracks (type, id, server = 'aggregate') {
+  async function fetchTracks (type, id, server = 'aggregate', signal) {
     const params = new URLSearchParams({ server, type, id: String(id) })
-    const response = await fetch(API + '?' + params, { headers: { accept: 'application/json' } })
+    const response = await fetch(API + '?' + params, { headers: { accept: 'application/json' }, signal })
     if (!response.ok) {
       const body = await response.text().catch(() => '')
       throw new Error(apiErrorMessage(response.status, body))
     }
     return normalizeList(await response.json(), server)
+  }
+
+  function normaliseMatchText (value) {
+    return String(value || '')
+      .normalize('NFKC')
+      .toLocaleLowerCase('zh-CN')
+      .replace(/[^\p{L}\p{N}]+/gu, '')
+  }
+
+  function editDistance (left, right, limit = 2) {
+    const a = Array.from(left)
+    const b = Array.from(right)
+    if (Math.abs(a.length - b.length) > limit) return limit + 1
+    let previous = b.map((_, index) => index + 1)
+    previous.unshift(0)
+    for (let row = 1; row <= a.length; row++) {
+      const current = [row]
+      let rowMinimum = row
+      for (let column = 1; column <= b.length; column++) {
+        const value = Math.min(
+          current[column - 1] + 1,
+          previous[column] + 1,
+          previous[column - 1] + (a[row - 1] === b[column - 1] ? 0 : 1)
+        )
+        current.push(value)
+        rowMinimum = Math.min(rowMinimum, value)
+      }
+      if (rowMinimum > limit) return limit + 1
+      previous = current
+    }
+    return previous[b.length]
+  }
+
+  function searchTokens (value) {
+    return String(value || '')
+      .normalize('NFKC')
+      .toLocaleLowerCase('zh-CN')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+  }
+
+  function fieldMatchScore (field, wanted) {
+    if (!field || !wanted) return 0
+    if (field === wanted) return 120
+    if (wanted.length >= 3 && editDistance(field, wanted, 2) <= 2) return 105
+    if (field.startsWith(wanted)) return 82
+    if (field.includes(wanted)) return 68
+    if (wanted.includes(field) && field.length >= 2) return 48
+    return 0
+  }
+
+  function searchRelevance (track, query, sourceIndex, rowIndex) {
+    const wanted = normaliseMatchText(query)
+    const title = normaliseMatchText(track.title)
+    const author = normaliseMatchText(track.author)
+    const album = normaliseMatchText(track.album)
+    const combined = title + author + album
+    let score = fieldMatchScore(title, wanted) * 3
+    score += fieldMatchScore(author, wanted) * 2
+    score += fieldMatchScore(album, wanted)
+    if (wanted && combined.includes(wanted)) score += 110
+    for (const token of searchTokens(query)) {
+      const normalised = normaliseMatchText(token)
+      score += Math.max(
+        fieldMatchScore(title, normalised) * 1.5,
+        fieldMatchScore(author, normalised) * 1.2,
+        fieldMatchScore(album, normalised) * 0.55
+      )
+    }
+    score -= rowIndex * 0.35
+    score -= sourceIndex * 0.02
+    return score
+  }
+
+  function rankSearchGroups (groups, query) {
+    const ranked = []
+    groups.forEach((rows, sourceIndex) => {
+      if (!rows) return
+      rows.forEach((track, rowIndex) => {
+        if (!track?.url || !normaliseMatchText(track.title)) return
+        ranked.push({ track, sourceIndex, rowIndex, score: searchRelevance(track, query, sourceIndex, rowIndex) })
+      })
+    })
+    ranked.sort((left, right) => right.score - left.score || left.rowIndex - right.rowIndex || left.sourceIndex - right.sourceIndex)
+    const seen = new Set()
+    const output = []
+    for (const item of ranked) {
+      const title = normaliseMatchText(item.track.title)
+      const author = normaliseMatchText(item.track.author)
+      const key = author ? title + '|' + author : item.track.server + '|' + item.track.url
+      if (seen.has(key)) continue
+      seen.add(key)
+      output.push(item.track)
+      if (output.length >= 80) break
+    }
+    return output
+  }
+
+  async function progressiveSearch (query, onUpdate) {
+    activeSearchControllers.forEach((controller) => controller.abort())
+    const controllers = SEARCH_SERVERS.map(() => new AbortController())
+    activeSearchControllers = controllers
+    const groups = Array(SEARCH_SERVERS.length)
+    let completed = 0
+    let successful = 0
+    let latest = []
+    let updateTimer = 0
+
+    const publish = (pending) => onUpdate(latest, completed, SEARCH_SERVERS.length, pending)
+    const tasks = SEARCH_SERVERS.map(async (server, sourceIndex) => {
+      const controller = controllers[sourceIndex]
+      const timer = setTimeout(() => controller.abort(), SEARCH_SOURCE_TIMEOUT_MS)
+      try {
+        groups[sourceIndex] = await fetchTracks('search', query, server, controller.signal)
+        successful += 1
+      } catch {
+        groups[sourceIndex] = []
+      } finally {
+        clearTimeout(timer)
+        completed += 1
+        latest = rankSearchGroups(groups, query)
+        if (latest.length && !updateTimer) {
+          updateTimer = setTimeout(() => {
+            updateTimer = 0
+            publish(true)
+          }, 80)
+        }
+      }
+    })
+
+    await Promise.all(tasks)
+    if (updateTimer) clearTimeout(updateTimer)
+    if (activeSearchControllers === controllers) activeSearchControllers = []
+    if (!successful) throw new Error('搜索暂时不可用，请稍后再试')
+    publish(false)
+    return latest
   }
 
   /* ---------- Navigation ---------- */
@@ -305,6 +446,26 @@
 
   /* ---------- Search ---------- */
 
+  function renderSearchState (query, results, completed, total, pending) {
+    state.searchResults = results
+    renderTrackRows(els.searchResults, results, '搜索：' + query)
+    els.searchCount.textContent = results.length + ' 首歌曲'
+    if (pending) {
+      els.searchSummary.textContent = `已聚合 ${completed}/${total} 个平台 · ${results.length} 首结果 · 正在继续补充并重排`
+    } else {
+      els.searchSummary.textContent = results.length
+        ? `聚合完成 · ${completed} 个平台已响应 · 已按相关度排序`
+        : '没有找到结果，试试更短或更具体的关键词。'
+    }
+    els.searchResultsWrap.hidden = results.length === 0
+    els.searchEmpty.hidden = pending || results.length !== 0
+    if (results.length) els.searchLoading.hidden = true
+    if (!pending && results.length === 0) {
+      els.searchEmpty.querySelector('h2').textContent = '没有找到匹配歌曲'
+      els.searchEmpty.querySelector('p').textContent = '换个关键词，或者同时输入歌曲名和歌手名。'
+    }
+  }
+
   async function runSearch (rawQuery) {
     const query = text(rawQuery || els.query.value)
     if (!query) {
@@ -322,20 +483,11 @@
     els.searchLoading.hidden = false
     const requestId = ++searchRequestId
     try {
-      const results = await fetchTracks('search', query)
+      await progressiveSearch(query, (partial, completed, total, pending) => {
+        if (requestId !== searchRequestId) return
+        renderSearchState(query, partial, completed, total, pending)
+      })
       if (requestId !== searchRequestId) return
-      state.searchResults = results
-      renderTrackRows(els.searchResults, state.searchResults, '搜索：' + query)
-      els.searchCount.textContent = state.searchResults.length + ' 首歌曲'
-      els.searchSummary.textContent = state.searchResults.length
-        ? '聚合搜索 · 已按相关度排序 · 点击任意歌曲开始连续播放'
-        : '没有找到结果，试试更短或更具体的关键词。'
-      els.searchResultsWrap.hidden = state.searchResults.length === 0
-      els.searchEmpty.hidden = state.searchResults.length !== 0
-      if (state.searchResults.length === 0) {
-        els.searchEmpty.querySelector('h2').textContent = '没有找到匹配歌曲'
-        els.searchEmpty.querySelector('p').textContent = '换个关键词，或者同时输入歌曲名和歌手名。'
-      }
     } catch (error) {
       if (requestId !== searchRequestId) return
       state.searchResults = []
