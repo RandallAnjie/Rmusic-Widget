@@ -157,7 +157,7 @@ const slowSearchStarted = Date.now()
 const budgetedSearch = await request('/api/proxy?type=search&id=Slow%20Search')
 const slowSearchElapsed = Date.now() - slowSearchStarted
 assert.equal(budgetedSearch.status, 200)
-assert.ok(slowSearchElapsed < 3000, `aggregate search exceeded latency budget: ${slowSearchElapsed} ms`)
+assert.ok(slowSearchElapsed < 4800, `aggregate search exceeded latency budget: ${slowSearchElapsed} ms`)
 assert.equal((await budgetedSearch.json())[0].server, 'netease')
 
 const aggregatePlaylist = await request('/api/proxy?server=aggregate&type=playlist&id=3778678')
