@@ -97,6 +97,8 @@ assert.match(sourceCss, /\.mobile-now-stage/)
 assert.match(sourceCss, /\.home-now-card/)
 assert.doesNotMatch(sourceHtml, /id="server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
+assert.match(clientSource, /const SEARCH_SERVERS = \[/)
+assert.match(clientSource, /async function progressiveSearch/)
 const motionDeclarations = sourceCss.match(/\b(?:animation|transition)\s*:[^;]+;/g) || []
 for (const declaration of motionDeclarations) {
   assert.match(declaration, /var\(--curve-|cubic-bezier\(|:\s*none/, `motion must use a cubic-bezier curve: ${declaration}`)
