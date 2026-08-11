@@ -20,7 +20,11 @@
 const WIDGET_REWRITTEN_PATH = '/api/proxy'
 const AGGREGATE_SEARCH_SERVERS = ['tencent', 'netease', 'kugou', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']
 const AGGREGATE_PLAYLIST_SERVERS = ['netease', 'tencent', 'kugou', 'ytmusic']
-const AGGREGATE_SEARCH_TIMEOUT_MS = 1800
+// A warm source often answers in under a second, but Meting service-binding
+// fan-out can add another 1-2 seconds during isolate or provider cold starts.
+// Keep the ceiling below the old five-second wait without dropping every
+// otherwise healthy source during a cold aggregate request.
+const AGGREGATE_SEARCH_TIMEOUT_MS = 3500
 const AGGREGATE_PLAYLIST_TIMEOUT_MS = 9000
 const AGGREGATE_RESULT_LIMIT = 80
 const AGGREGATE_FAST_SOURCE_COUNT = 3
