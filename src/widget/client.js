@@ -23,6 +23,16 @@
     clearSearch: $('clearSearch'),
     greeting: $('greeting'),
     toast: $('toast'),
+    homeNowCard: $('home-now-card'),
+    homeNowCover: $('home-now-cover'),
+    homeNowFallback: $('home-now-fallback'),
+    homeNowKicker: $('home-now-kicker'),
+    homeNowTitle: $('home-now-title'),
+    homeNowAuthor: $('home-now-author'),
+    homeNowProgress: $('home-now-progress'),
+    homeNowAction: $('home-now-action'),
+    homeNowActionIcon: $('home-now-action-icon'),
+    homeNowActionLabel: $('home-now-action-label'),
     recentGrid: $('recent-grid'),
     favoritePreview: $('favorite-preview'),
     favoritePreviewSection: $('favorite-preview-section'),
@@ -52,6 +62,12 @@
     saveCollection: $('saveCollection'),
     contextPanel: $('context-panel'),
     closePanel: $('closePanel'),
+    mobileNowBackdrop: $('mobile-now-backdrop'),
+    mobileNowCover: $('mobile-now-cover'),
+    mobileNowFallback: $('mobile-now-fallback'),
+    mobileNowTitle: $('mobile-now-title'),
+    mobileNowAuthor: $('mobile-now-author'),
+    mobileNowLike: $('mobile-now-like'),
     queueNow: $('queue-now'),
     queueCurrent: $('queue-current'),
     queueList: $('queue-list'),
@@ -64,6 +80,7 @@
     nowTitle: $('now-title'),
     nowAuthor: $('now-author'),
     nowLike: $('now-like'),
+    playerTrack: $('player-track'),
     shuffleBtn: $('shuffleBtn'),
     prevBtn: $('prevBtn'),
     playBtn: $('playBtn'),
@@ -77,6 +94,19 @@
     progressFill: $('progress-fill'),
     progressBuffered: $('progress-buffered'),
     progressThumb: $('progress-thumb'),
+    mobileShuffleBtn: $('mobileShuffleBtn'),
+    mobilePrevBtn: $('mobilePrevBtn'),
+    mobilePlayBtn: $('mobilePlayBtn'),
+    mobilePlayIcon: $('mobilePlayIcon'),
+    mobileNextBtn: $('mobileNextBtn'),
+    mobileLoopBtn: $('mobileLoopBtn'),
+    mobileRepeatBadge: $('mobileRepeatBadge'),
+    mobileCurrTime: $('mobile-curr-time'),
+    mobileDuration: $('mobile-duration'),
+    mobileProgressBar: $('mobile-progress-bar'),
+    mobileProgressFill: $('mobile-progress-fill'),
+    mobileProgressBuffered: $('mobile-progress-buffered'),
+    mobileProgressThumb: $('mobile-progress-thumb'),
     volume: $('volume'),
     playlistModal: $('playlist-modal'),
     closePlaylistModal: $('closePlaylistModal'),
@@ -117,7 +147,6 @@
   let toastTimer = 0
   let pendingSkipTimer = 0
   let progressDragging = false
-  let prewarmedUrl = ''
   let lrcData = []
   let lastLrcIndex = -1
   let searchRequestId = 0
@@ -199,6 +228,7 @@
       const img = document.createElement('img')
       img.alt = ''
       img.loading = eager ? 'eager' : 'lazy'
+      img.decoding = 'async'
       img.src = track.pic
       img.addEventListener('load', () => { fallback.hidden = true })
       img.addEventListener('error', () => { img.remove(); fallback.hidden = false })
@@ -467,8 +497,10 @@
       button.title = liked ? '取消喜欢' : '添加到喜欢'
     })
     const currentLiked = state.currentTrack && isFavorite(state.currentTrack)
-    els.nowLike.classList.toggle('liked', !!currentLiked)
-    els.nowLike.title = currentLiked ? '取消喜欢' : '添加到喜欢'
+    ;[els.nowLike, els.mobileNowLike].forEach((button) => {
+      button.classList.toggle('liked', !!currentLiked)
+      button.title = currentLiked ? '取消喜欢' : '添加到喜欢'
+    })
   }
 
   function addRecent (track) {
@@ -493,6 +525,7 @@
   }
 
   els.nowLike.addEventListener('click', () => { if (state.currentTrack) toggleFavorite(state.currentTrack) })
+  els.mobileNowLike.addEventListener('click', () => { if (state.currentTrack) toggleFavorite(state.currentTrack) })
   els.clearRecent.addEventListener('click', () => {
     state.recent = []
     writeJson(STORAGE.recent, state.recent)
@@ -701,6 +734,7 @@
     els.collectionCover.innerHTML = ''
     if (collection.tracks[0]?.pic) {
       const image = document.createElement('img')
+      image.decoding = 'async'
       image.src = collection.tracks[0].pic
       image.alt = ''
       image.addEventListener('error', () => { image.remove(); els.collectionCover.textContent = initials(collection.name) })
@@ -750,7 +784,6 @@
     clearTimeout(pendingSkipTimer)
     state.queueIndex = index
     state.currentTrack = track
-    prewarmedUrl = ''
     updateNowPlaying(track)
     renderQueue()
     syncCurrentRows()
@@ -780,24 +813,49 @@
     loadLyrics(track)
   }
 
+  function setArtwork (image, fallback, track) {
+    fallback.textContent = initials(track.title)
+    fallback.hidden = false
+    if (!track.pic) {
+      image.hidden = true
+      image.removeAttribute('src')
+      return
+    }
+    const expected = new URL(track.pic, location.href).href
+    image.hidden = false
+    image.decoding = 'async'
+    image.src = track.pic
+    image.onload = () => { if (image.src === expected) fallback.hidden = true }
+    image.onerror = () => {
+      if (image.src !== expected) return
+      image.hidden = true
+      fallback.hidden = false
+    }
+  }
+
   function updateNowPlaying (track) {
     els.nowTitle.textContent = track.title
     els.nowAuthor.textContent = track.author
     els.lyricsTitle.textContent = track.title
     els.nowLike.disabled = false
-    els.nowCoverFallback.textContent = initials(track.title)
-    els.nowCoverFallback.hidden = false
+    els.mobileNowTitle.textContent = track.title
+    els.mobileNowAuthor.textContent = track.author
+    els.mobileNowLike.disabled = false
+    els.homeNowKicker.textContent = 'NOW PLAYING · ' + sourceName(track.server).toUpperCase()
+    els.homeNowTitle.textContent = track.title
+    els.homeNowAuthor.textContent = track.author
+    els.homeNowCard.classList.add('has-track')
+    setArtwork(els.nowCover, els.nowCoverFallback, track)
+    setArtwork(els.mobileNowCover, els.mobileNowFallback, track)
+    setArtwork(els.homeNowCover, els.homeNowFallback, track)
     if (track.pic) {
-      els.nowCover.hidden = false
-      els.nowCover.src = track.pic
-      els.nowCover.addEventListener('load', () => { els.nowCoverFallback.hidden = true }, { once: true })
-      els.nowCover.addEventListener('error', () => { els.nowCover.hidden = true; els.nowCoverFallback.hidden = false }, { once: true })
       els.ambient.style.backgroundImage = "url('" + track.pic.replace(/'/g, '%27') + "')"
       els.ambient.style.opacity = '.42'
+      els.mobileNowBackdrop.style.backgroundImage = els.ambient.style.backgroundImage
     } else {
-      els.nowCover.hidden = true
       els.ambient.style.backgroundImage = ''
       els.ambient.style.opacity = '.78'
+      els.mobileNowBackdrop.style.backgroundImage = ''
     }
     syncFavoriteButtons()
     updateMediaSession(track)
@@ -807,23 +865,29 @@
 
   function updateTransportEnabled () {
     const hasQueue = state.queue.length > 0
-    els.prevBtn.disabled = !hasQueue
-    els.nextBtn.disabled = !hasQueue
-    els.playBtn.disabled = !hasQueue
+    ;[els.prevBtn, els.nextBtn, els.playBtn, els.mobilePrevBtn, els.mobileNextBtn, els.mobilePlayBtn].forEach((button) => {
+      button.disabled = !hasQueue
+    })
   }
 
   function setLoading (loading) {
     state.loadingAudio = !!loading
-    els.playBtn.classList.toggle('loading', state.loadingAudio)
+    ;[els.playBtn, els.mobilePlayBtn].forEach((button) => button.classList.toggle('loading', state.loadingAudio))
     if (!state.loadingAudio) updatePlayIcon()
   }
 
   function updatePlayIcon () {
     const paused = els.audio.paused
     iconUse(els.playIcon, paused ? 'i-play' : 'i-pause')
-    els.playBtn.classList.toggle('paused', paused)
-    els.playBtn.title = paused ? '播放' : '暂停'
-    els.playBtn.setAttribute('aria-label', paused ? '播放' : '暂停')
+    iconUse(els.mobilePlayIcon, paused ? 'i-play' : 'i-pause')
+    iconUse(els.homeNowActionIcon, state.currentTrack ? (paused ? 'i-play' : 'i-pause') : 'i-search')
+    els.homeNowAction.classList.toggle('playback', !!state.currentTrack)
+    els.homeNowActionLabel.textContent = state.currentTrack ? (paused ? '继续播放' : '暂停') : '去搜索'
+    ;[els.playBtn, els.mobilePlayBtn].forEach((button) => {
+      button.classList.toggle('paused', paused)
+      button.title = paused ? '播放' : '暂停'
+      button.setAttribute('aria-label', paused ? '播放' : '暂停')
+    })
   }
 
   function togglePlay () {
@@ -855,21 +919,32 @@
   }
 
   els.playBtn.addEventListener('click', togglePlay)
+  els.mobilePlayBtn.addEventListener('click', togglePlay)
+  els.homeNowAction.addEventListener('click', togglePlay)
   els.prevBtn.addEventListener('click', () => advance(-1))
+  els.mobilePrevBtn.addEventListener('click', () => advance(-1))
   els.nextBtn.addEventListener('click', () => advance(1))
-  els.shuffleBtn.addEventListener('click', () => {
+  els.mobileNextBtn.addEventListener('click', () => advance(1))
+  function toggleShuffle () {
     state.shuffle = state.shuffle === 'on' ? 'off' : 'on'
     renderModes()
-  })
-  els.loopBtn.addEventListener('click', () => {
+  }
+  function toggleLoop () {
     state.repeat = state.repeat === 'off' ? 'all' : state.repeat === 'all' ? 'single' : 'off'
     renderModes()
-  })
+  }
+  els.shuffleBtn.addEventListener('click', toggleShuffle)
+  els.mobileShuffleBtn.addEventListener('click', toggleShuffle)
+  els.loopBtn.addEventListener('click', toggleLoop)
+  els.mobileLoopBtn.addEventListener('click', toggleLoop)
 
   function renderModes () {
     els.shuffleBtn.dataset.mode = state.shuffle
+    els.mobileShuffleBtn.dataset.mode = state.shuffle
     els.loopBtn.dataset.mode = state.repeat
+    els.mobileLoopBtn.dataset.mode = state.repeat
     els.repeatBadge.textContent = state.repeat === 'single' ? '1' : ''
+    els.mobileRepeatBadge.textContent = state.repeat === 'single' ? '1' : ''
     els.shuffleBtn.title = state.shuffle === 'on' ? '关闭随机播放' : '随机播放'
     els.loopBtn.title = state.repeat === 'off' ? '开启列表循环' : state.repeat === 'all' ? '切换单曲循环' : '关闭循环'
     writeJson(STORAGE.modes, { shuffle: state.shuffle, loop: state.repeat })
@@ -945,11 +1020,17 @@
 
   /* ---------- Side panel ---------- */
 
-  function openPanel (name) {
-    const shouldClose = state.openPanel === name && !els.contextPanel.hidden
+  function usesMobilePlayer () {
+    return window.matchMedia('(max-width: 780px), (max-width: 920px) and (max-height: 520px)').matches
+  }
+
+  function openPanel (name, forceOpen = false) {
+    const shouldClose = !forceOpen && state.openPanel === name && !els.contextPanel.hidden
     state.openPanel = shouldClose ? null : name
     els.contextPanel.hidden = !state.openPanel
     els.app.classList.toggle('panel-open', !!state.openPanel)
+    document.body.classList.toggle('now-playing-open', !!state.openPanel && usesMobilePlayer())
+    els.playerTrack.setAttribute('aria-expanded', String(!!state.openPanel))
     $$('.panel-trigger').forEach((button) => button.classList.toggle('active', button.dataset.panel === state.openPanel))
     if (state.openPanel) setPanelPage(state.openPanel)
   }
@@ -968,11 +1049,34 @@
   $$('.panel-trigger').forEach((button) => button.addEventListener('click', () => openPanel(button.dataset.panel)))
   $$('[data-panel-tab]').forEach((button) => button.addEventListener('click', () => setPanelPage(button.dataset.panelTab)))
   els.closePanel.addEventListener('click', () => openPanel(state.openPanel))
+  els.playerTrack.addEventListener('click', (event) => {
+    if (event.target.closest('button')) return
+    openPanel(state.openPanel || 'lyrics', true)
+  })
+  els.playerTrack.addEventListener('keydown', (event) => {
+    if (event.target !== els.playerTrack || !['Enter', ' '].includes(event.key)) return
+    event.preventDefault()
+    event.stopPropagation()
+    openPanel(state.openPanel || 'lyrics', true)
+  })
 
   /* ---------- Audio events and progress ---------- */
 
-  els.audio.addEventListener('play', () => { els.player.classList.add('is-playing'); setLoading(state.loadingAudio); updatePlayIcon(); setMediaPlaybackState('playing') })
-  els.audio.addEventListener('pause', () => { els.player.classList.remove('is-playing'); updatePlayIcon(); setMediaPlaybackState('paused') })
+  els.audio.addEventListener('play', () => {
+    els.player.classList.add('is-playing')
+    els.contextPanel.classList.add('is-playing')
+    els.homeNowCard.classList.add('is-playing')
+    setLoading(state.loadingAudio)
+    updatePlayIcon()
+    setMediaPlaybackState('playing')
+  })
+  els.audio.addEventListener('pause', () => {
+    els.player.classList.remove('is-playing')
+    els.contextPanel.classList.remove('is-playing')
+    els.homeNowCard.classList.remove('is-playing')
+    updatePlayIcon()
+    setMediaPlaybackState('paused')
+  })
   els.audio.addEventListener('loadstart', () => setLoading(true))
   els.audio.addEventListener('waiting', () => setLoading(true))
   els.audio.addEventListener('canplay', () => setLoading(false))
@@ -1007,25 +1111,37 @@
     const duration = els.audio.duration || 0
     els.currTime.textContent = formatTime(current)
     els.duration.textContent = formatTime(duration)
+    els.mobileCurrTime.textContent = formatTime(current)
+    els.mobileDuration.textContent = formatTime(duration)
     const percent = duration > 0 ? Math.min(100, (current / duration) * 100) : 0
+    ;[els.progressBar, els.mobileProgressBar].forEach((bar) => {
+      bar.setAttribute('aria-valuenow', String(Math.round(percent)))
+      bar.setAttribute('aria-valuetext', formatTime(current) + ' / ' + formatTime(duration))
+    })
+    els.homeNowProgress.style.width = percent + '%'
     if (!progressDragging) {
-      els.progressFill.style.width = percent + '%'
-      els.progressThumb.style.left = percent + '%'
+      setProgressVisual(percent)
     }
+  }
+
+  function setProgressVisual (percent) {
+    ;[els.progressFill, els.mobileProgressFill].forEach((fill) => { fill.style.width = percent + '%' })
+    ;[els.progressThumb, els.mobileProgressThumb].forEach((thumb) => { thumb.style.left = percent + '%' })
   }
 
   function updateBuffered () {
     const duration = els.audio.duration || 0
     if (duration <= 0 || !els.audio.buffered.length) {
-      els.progressBuffered.style.width = '0%'
+      ;[els.progressBuffered, els.mobileProgressBuffered].forEach((buffered) => { buffered.style.width = '0%' })
       return
     }
     const end = els.audio.buffered.end(els.audio.buffered.length - 1)
-    els.progressBuffered.style.width = Math.min(100, (end / duration) * 100) + '%'
+    const width = Math.min(100, (end / duration) * 100) + '%'
+    ;[els.progressBuffered, els.mobileProgressBuffered].forEach((buffered) => { buffered.style.width = width })
   }
 
-  function percentFromPointer (event) {
-    const rect = els.progressBar.getBoundingClientRect()
+  function percentFromPointer (event, bar) {
+    const rect = bar.getBoundingClientRect()
     return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
   }
 
@@ -1033,46 +1149,55 @@
     const duration = els.audio.duration
     if (!Number.isFinite(duration) || duration <= 0) return
     els.audio.currentTime = duration * percent
-    els.progressFill.style.width = (percent * 100) + '%'
-    els.progressThumb.style.left = (percent * 100) + '%'
+    setProgressVisual(percent * 100)
+    els.homeNowProgress.style.width = (percent * 100) + '%'
     els.currTime.textContent = formatTime(duration * percent)
+    els.mobileCurrTime.textContent = formatTime(duration * percent)
   }
 
-  els.progressBar.addEventListener('pointerdown', (event) => {
-    if (!state.currentTrack) return
-    progressDragging = true
-    els.progressBar.classList.add('dragging')
-    els.progressBar.setPointerCapture(event.pointerId)
-    seekPercent(percentFromPointer(event))
-  })
-  els.progressBar.addEventListener('pointermove', (event) => { if (progressDragging) seekPercent(percentFromPointer(event)) })
-  els.progressBar.addEventListener('pointerup', (event) => {
-    progressDragging = false
-    els.progressBar.classList.remove('dragging')
-    try { els.progressBar.releasePointerCapture(event.pointerId) } catch {}
-  })
-  els.progressBar.addEventListener('pointercancel', () => { progressDragging = false; els.progressBar.classList.remove('dragging') })
+  function bindProgressBar (bar) {
+    bar.addEventListener('pointerdown', (event) => {
+      if (!state.currentTrack) return
+      progressDragging = true
+      bar.classList.add('dragging')
+      bar.setPointerCapture(event.pointerId)
+      seekPercent(percentFromPointer(event, bar))
+    })
+    bar.addEventListener('pointermove', (event) => { if (progressDragging) seekPercent(percentFromPointer(event, bar)) })
+    bar.addEventListener('pointerup', (event) => {
+      progressDragging = false
+      bar.classList.remove('dragging')
+      try { bar.releasePointerCapture(event.pointerId) } catch {}
+    })
+    bar.addEventListener('pointercancel', () => { progressDragging = false; bar.classList.remove('dragging') })
+    bar.addEventListener('keydown', (event) => {
+      const duration = els.audio.duration
+      if (!Number.isFinite(duration) || duration <= 0) return
+      let target = null
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') target = Math.max(0, els.audio.currentTime - 5)
+      if (event.key === 'ArrowRight' || event.key === 'ArrowUp') target = Math.min(duration, els.audio.currentTime + 5)
+      if (event.key === 'Home') target = 0
+      if (event.key === 'End') target = duration
+      if (target == null) return
+      event.preventDefault()
+      event.stopPropagation()
+      seekPercent(target / duration)
+      updateProgress()
+    })
+  }
+
+  bindProgressBar(els.progressBar)
+  bindProgressBar(els.mobileProgressBar)
 
   els.audio.addEventListener('timeupdate', () => {
     updateProgress()
     setActiveLyrics()
-    maybePrewarmNext()
   })
   els.audio.addEventListener('durationchange', () => { updateProgress(); updateMediaPosition() })
   els.audio.addEventListener('progress', updateBuffered)
   els.player.addEventListener('animationend', (event) => {
     if (event.animationName === 'cover-swap') els.player.classList.remove('track-changed')
   })
-
-  function maybePrewarmNext () {
-    const duration = els.audio.duration || 0
-    if (duration <= 0 || duration - els.audio.currentTime > 8) return
-    const index = state.queueIndex + 1
-    const next = state.queue[index]
-    if (!next?.url || prewarmedUrl === next.url) return
-    prewarmedUrl = next.url
-    fetch(next.url, { method: 'HEAD' }).catch(() => {})
-  }
 
   const savedVolume = Number.parseFloat(readStorage(STORAGE.volume, '0.8'))
   els.volume.value = String(Number.isFinite(savedVolume) ? Math.min(1, Math.max(0, savedVolume)) : 0.8)
@@ -1226,10 +1351,25 @@
 
   function findLrcIndex () {
     const current = els.audio.currentTime || 0
-    for (let index = 0; index < lrcData.length; index++) {
-      if (current < lrcData[index].time) return index - 1
+    if (lastLrcIndex >= 0 && lastLrcIndex < lrcData.length) {
+      let index = lastLrcIndex
+      while (index + 1 < lrcData.length && current >= lrcData[index + 1].time) index += 1
+      while (index >= 0 && current < lrcData[index].time) index -= 1
+      return index
     }
-    return lrcData.length - 1
+    let low = 0
+    let high = lrcData.length - 1
+    let match = -1
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2)
+      if (lrcData[middle].time <= current) {
+        match = middle
+        low = middle + 1
+      } else {
+        high = middle - 1
+      }
+    }
+    return match
   }
 
   function setActiveLyrics () {

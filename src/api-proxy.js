@@ -20,9 +20,11 @@
 const WIDGET_REWRITTEN_PATH = '/api/proxy'
 const AGGREGATE_SEARCH_SERVERS = ['tencent', 'netease', 'kugou', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']
 const AGGREGATE_PLAYLIST_SERVERS = ['netease', 'tencent', 'kugou', 'ytmusic']
-const AGGREGATE_SEARCH_TIMEOUT_MS = 5000
+const AGGREGATE_SEARCH_TIMEOUT_MS = 1800
 const AGGREGATE_PLAYLIST_TIMEOUT_MS = 9000
 const AGGREGATE_RESULT_LIMIT = 80
+const AGGREGATE_FAST_SOURCE_COUNT = 3
+const AGGREGATE_FAST_RESULT_COUNT = 30
 // NetEase is first because its audio resolver is generally faster and
 // does not depend on YouTube's bot challenge. YouTube Music remains a
 // second chance for exact official matches when its player session is
@@ -258,8 +260,7 @@ function rankAggregateTracks (groups, query) {
   return output
 }
 
-async function fetchAggregateSource (config, server, type, id, timeoutMs) {
-  const controller = new AbortController()
+async function fetchAggregateSource (config, server, type, id, timeoutMs, controller = new AbortController()) {
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await callUpstream(
@@ -283,6 +284,35 @@ async function fetchAggregateSource (config, server, type, id, timeoutMs) {
   }
 }
 
+async function collectAggregateSources (config, servers, type, id, timeoutMs) {
+  const pending = new Set(servers.map((server) => {
+    const controller = new AbortController()
+    const entry = { server, controller, promise: null }
+    entry.promise = fetchAggregateSource(config, server, type, id, timeoutMs, controller)
+      .then((result) => ({ entry, result }))
+    return entry
+  }))
+  const completed = []
+
+  while (pending.size) {
+    const { entry, result } = await Promise.race(Array.from(pending, (item) => item.promise))
+    pending.delete(entry)
+    completed.push(result)
+
+    if (type === 'search') {
+      const useful = completed.filter((item) => item.ok && item.rows.length)
+      const rowCount = useful.reduce((sum, item) => sum + item.rows.length, 0)
+      if (useful.length >= AGGREGATE_FAST_SOURCE_COUNT && rowCount >= AGGREGATE_FAST_RESULT_COUNT) break
+    }
+  }
+
+  // Once enough useful search results have arrived, cancel stragglers.
+  // Their promises resolve through fetchAggregateSource's catch path,
+  // so no rejected work is left behind after the response is returned.
+  for (const entry of pending) entry.controller.abort()
+  return completed
+}
+
 async function aggregateMetadata (config, type, id) {
   if (type !== 'search' && type !== 'playlist') {
     return Response.json(
@@ -292,7 +322,7 @@ async function aggregateMetadata (config, type, id) {
   }
   const servers = type === 'search' ? AGGREGATE_SEARCH_SERVERS : AGGREGATE_PLAYLIST_SERVERS
   const timeoutMs = type === 'search' ? AGGREGATE_SEARCH_TIMEOUT_MS : AGGREGATE_PLAYLIST_TIMEOUT_MS
-  const results = await Promise.all(servers.map((server) => fetchAggregateSource(config, server, type, id, timeoutMs)))
+  const results = await collectAggregateSources(config, servers, type, id, timeoutMs)
   const healthy = results.filter((result) => result.ok)
   if (!healthy.length) {
     return Response.json(
@@ -305,7 +335,7 @@ async function aggregateMetadata (config, type, id) {
   let usedSources
   if (type === 'search') {
     rows = rankAggregateTracks(healthy, id)
-    usedSources = healthy.map((result) => result.server)
+    usedSources = healthy.filter((result) => result.rows.length).map((result) => result.server)
   } else {
     const selected = healthy.find((result) => result.rows.length)
     rows = selected?.rows || []

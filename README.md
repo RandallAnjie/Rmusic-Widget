@@ -8,8 +8,9 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 队列、随机播放、列表/单曲循环、进度和音量控制
 - 标准 LRC + Enhanced LRC 逐字歌词
 - 喜欢的歌曲、最近播放和保存的在线歌单
-- 桌面端三栏布局；移动端单行播放器、横向卡片、安全区和横屏适配
+- 桌面端三栏布局；移动端单行播放器可展开为完整 Now Playing、歌词与队列页面
 - 页面、列表、弹层和播放状态统一使用 `cubic-bezier()` 动效曲线
+- 静态资源构建时压缩，并通过内容哈希、ETag 和 immutable 缓存降低重复加载
 - Tencent vkey 拒绝时按歌曲名与歌手自动回退网易云 / YouTube Music
 - OS 锁屏 / 蓝牙耳机 / 系统媒体控件（Media Session）
 
@@ -22,7 +23,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 1. Worker 在服务端注入 `MUSIC_API_TOKEN`；浏览器永远看不到 master token。
 2. Meting-API 返回的 `url` / `pic` / `lrc` / `lrcpword` 会重写成本站代理 URL。
 3. 音频 Range、封面和歌词均通过代理返回；上游错误状态保持不变，只有 Tencent `403/404` 音频会进行严格同曲回退。
-4. 聚合搜索由 Worker 并行请求各平台，单个平台失败只会被跳过，不会把 master token 或跨域资源地址暴露给浏览器。
+4. 聚合搜索由 Worker 并行请求各平台；收集到足够结果后会取消慢源，单个平台失败或超时不会阻塞整次搜索。
 5. 每 IP、每 isolate 有滑动窗口限流，默认 `180` 次/分钟。
 
 ## 路由
@@ -43,7 +44,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 ### 聚合搜索
 
-前端不再展示搜索音源选择。`server=aggregate&type=search` 会并行查询 QQ 音乐、网易云、酷狗、YouTube Music、酷我、百度、Apple Music 和 Spotify；不可用或超时的平台自动跳过。结果会过滤无效条目，合并标题和歌手完全相同的重复项，并综合标题、歌手、专辑、关键词覆盖率与平台原始排名计算相关度，最多返回 80 首。
+前端不再展示搜索音源选择。`server=aggregate&type=search` 会并行查询 QQ 音乐、网易云、酷狗、YouTube Music、酷我、百度、Apple Music 和 Spotify；搜索预算为 1.8 秒，取得至少三个有效来源且结果足够时会提前结束并取消慢请求。不可用或超时的平台自动跳过。结果会过滤无效条目，合并标题和歌手完全相同的重复项，并综合标题、歌手、专辑、关键词覆盖率与平台原始排名计算相关度，最多返回 80 首。
 
 聚合请求返回 `X-RMusic-Sources` 响应头，列出本次成功参与的音源。具体歌曲仍保留实际 `server`，因此播放、封面、歌词、收藏和最近播放可以继续使用对应平台资源。
 
@@ -84,7 +85,7 @@ npm run build
 npm run lint
 ```
 
-构建会把 HTML、CSS、JS 内联进单个 `dist/_worker.js`，同时把内容 hash 写入静态资源 URL，避免部署后 HTML 与旧缓存资源不匹配。
+构建会压缩 HTML、CSS、JS 并内联进单个 `dist/_worker.js`，同时生成 Brotli/Gzip 版本，把内容 hash 写入静态资源 URL。带 hash 的 CSS/JS 使用一年 immutable 缓存，HTML 使用短 CDN 缓存和 ETag 验证。
 
 ## 文件结构
 

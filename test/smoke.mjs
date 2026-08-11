@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { brotliDecompressSync } from 'node:zlib'
 import worker from '../dist/_worker.js'
 
 const calls = []
@@ -27,6 +28,16 @@ const env = {
       const type = url.searchParams.get('type')
       const server = url.searchParams.get('server')
       if (['search', 'playlist'].includes(type)) {
+        if (type === 'search' && url.searchParams.get('id') === 'Slow Search') {
+          if (server === 'netease') return Response.json(fixture)
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => resolve(Response.json([])), 10000)
+            init.signal?.addEventListener('abort', () => {
+              clearTimeout(timer)
+              reject(new DOMException('aborted', 'AbortError'))
+            }, { once: true })
+          })
+        }
         if (type === 'search' && url.searchParams.get('id') === 'Night Drive') {
           if (server === 'netease') return Response.json(fixture)
           if (server === 'tencent') return Response.json([{ ...fixture[0], title: 'Night Drive (Live)', url: 'https://music.example/api?server=tencent&type=url&id=live-1' }])
@@ -67,6 +78,8 @@ const html = await home.text()
 assert.match(html, /id="view-home"/)
 assert.match(html, /id="view-library"/)
 assert.match(html, /id="context-panel"/)
+assert.match(html, /id="mobile-now-cover"/)
+assert.match(html, /id="home-now-card"/)
 assert.doesNotMatch(html, /server-only-secret/)
 
 const sourceHtml = fs.readFileSync(new URL('../src/widget/index.html', import.meta.url), 'utf8')
@@ -80,6 +93,8 @@ assert.match(sourceCss, /@media \(max-width: 900px\)/)
 assert.match(sourceCss, /@media \(max-width: 780px\)/)
 assert.match(sourceCss, /env\(safe-area-inset-bottom\)/)
 assert.match(sourceCss, /@keyframes mobile-player-enter/)
+assert.match(sourceCss, /\.mobile-now-stage/)
+assert.match(sourceCss, /\.home-now-card/)
 assert.doesNotMatch(sourceHtml, /id="server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
 const motionDeclarations = sourceCss.match(/\b(?:animation|transition)\s*:[^;]+;/g) || []
@@ -91,6 +106,18 @@ for (const declaration of motionDeclarations) {
 const css = await request('/widget.css')
 assert.match(css.headers.get('content-type'), /text\/css/)
 assert.match(await css.text(), /\.app-shell/)
+
+const assetHash = html.match(/widget\.css\?v=([a-f0-9]+)/)?.[1]
+assert.ok(assetHash)
+const compressedCss = await request(`/widget.css?v=${assetHash}`, { headers: { 'accept-encoding': 'br' } })
+assert.equal(compressedCss.headers.get('content-encoding'), 'br')
+assert.match(compressedCss.headers.get('cache-control'), /max-age=31536000/)
+assert.match(compressedCss.headers.get('cache-control'), /immutable/)
+const cssEtag = compressedCss.headers.get('etag')
+assert.ok(cssEtag)
+assert.match(brotliDecompressSync(Buffer.from(await compressedCss.arrayBuffer())).toString(), /\.app-shell/)
+const freshCss = await request(`/widget.css?v=${assetHash}`, { headers: { 'if-none-match': cssEtag } })
+assert.equal(freshCss.status, 304)
 
 const js = await request('/widget.js')
 assert.match(js.headers.get('content-type'), /javascript/)
@@ -125,6 +152,13 @@ assert.equal(aggregateTracks[1].title, 'Night Drive (Live)')
 const aggregateCalls = calls.slice(aggregateCallStart)
 assert.ok(aggregateCalls.length >= 8)
 assert.ok(aggregateCalls.every(({ url }) => url.searchParams.get('token') === 'server-only-secret'))
+
+const slowSearchStarted = Date.now()
+const budgetedSearch = await request('/api/proxy?type=search&id=Slow%20Search')
+const slowSearchElapsed = Date.now() - slowSearchStarted
+assert.equal(budgetedSearch.status, 200)
+assert.ok(slowSearchElapsed < 3000, `aggregate search exceeded latency budget: ${slowSearchElapsed} ms`)
+assert.equal((await budgetedSearch.json())[0].server, 'netease')
 
 const aggregatePlaylist = await request('/api/proxy?server=aggregate&type=playlist&id=3778678')
 assert.equal(aggregatePlaylist.status, 200)
