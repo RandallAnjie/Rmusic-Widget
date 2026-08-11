@@ -25,10 +25,17 @@ import { proxyApi } from './api-proxy.js'
 // text before bundling. The references look unresolved when you read
 // this file pre-build — that's expected, the worker only ever runs
 // from the bundled dist/worker.js.
-/* global __WIDGET_HTML__, __WIDGET_CSS__, __WIDGET_JS__ */
+/* global __WIDGET_HTML__, __WIDGET_CSS__, __WIDGET_JS__, __WIDGET_ASSET_HASH__, __WIDGET_HTML_BR__, __WIDGET_HTML_GZIP__, __WIDGET_CSS_BR__, __WIDGET_CSS_GZIP__, __WIDGET_JS_BR__, __WIDGET_JS_GZIP__ */
 const WIDGET_HTML = __WIDGET_HTML__
 const WIDGET_CSS = __WIDGET_CSS__
 const WIDGET_JS = __WIDGET_JS__
+const WIDGET_ASSET_HASH = __WIDGET_ASSET_HASH__
+const COMPRESSED_ASSETS = {
+  html: { br: __WIDGET_HTML_BR__, gzip: __WIDGET_HTML_GZIP__ },
+  css: { br: __WIDGET_CSS_BR__, gzip: __WIDGET_CSS_GZIP__ },
+  js: { br: __WIDGET_JS_BR__, gzip: __WIDGET_JS_GZIP__ }
+}
+const decodedAssets = new Map()
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -55,6 +62,42 @@ function plain (status, body) {
   })
 }
 
+function decodeAsset (key, base64) {
+  if (decodedAssets.has(key)) return decodedAssets.get(key)
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+  decodedAssets.set(key, bytes)
+  return bytes
+}
+
+function staticResponse (request, kind, value, contentType, cacheControl, etag) {
+  const headers = new Headers({
+    'content-type': contentType,
+    'cache-control': cacheControl,
+    etag,
+    vary: 'Accept-Encoding'
+  })
+  const candidates = request.headers.get('accept-encoding') || ''
+  let body = value
+  if (/\bbr\b/.test(candidates)) {
+    headers.set('content-encoding', 'br')
+    body = decodeAsset(`${kind}:br`, COMPRESSED_ASSETS[kind].br)
+  } else if (/\bgzip\b/.test(candidates)) {
+    headers.set('content-encoding', 'gzip')
+    body = decodeAsset(`${kind}:gzip`, COMPRESSED_ASSETS[kind].gzip)
+  }
+  if (request.headers.get('if-none-match') === etag) {
+    return new Response(null, { status: 304, headers })
+  }
+  return new Response(request.method === 'HEAD' ? null : body, {
+    headers,
+    // Cloudflare should preserve the pre-compressed bytes instead of
+    // attempting a second content-encoding pass.
+    encodeBody: 'manual'
+  })
+}
+
 async function route (request, env) {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: CORS_HEADERS })
@@ -74,31 +117,36 @@ async function route (request, env) {
     // moderately long — their URL is uniquely tied to their bytes
     // via the hash query param, so a content change always shows
     // up at a fresh URL.
-    return new Response(WIDGET_HTML, {
-      headers: {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'public, max-age=30, must-revalidate'
-      }
-    })
+    return staticResponse(
+      request,
+      'html',
+      WIDGET_HTML,
+      'text/html; charset=utf-8',
+      'public, max-age=0, must-revalidate, s-maxage=60',
+      `W/"${WIDGET_ASSET_HASH}-html"`
+    )
   }
   if (url.pathname === '/widget.css') {
-    return new Response(WIDGET_CSS, {
-      headers: {
-        'content-type': 'text/css; charset=utf-8',
-        // 60 s is short enough that a CDN cache miss after redeploy
-        // resolves on its own without flushing, yet long enough to
-        // dedup repeat visits within a session.
-        'cache-control': 'public, max-age=60'
-      }
-    })
+    const immutable = url.searchParams.get('v') === WIDGET_ASSET_HASH
+    return staticResponse(
+      request,
+      'css',
+      WIDGET_CSS,
+      'text/css; charset=utf-8',
+      immutable ? 'public, max-age=31536000, immutable' : 'public, max-age=300, must-revalidate',
+      `W/"${WIDGET_ASSET_HASH}-css"`
+    )
   }
   if (url.pathname === '/widget.js') {
-    return new Response(WIDGET_JS, {
-      headers: {
-        'content-type': 'text/javascript; charset=utf-8',
-        'cache-control': 'public, max-age=60'
-      }
-    })
+    const immutable = url.searchParams.get('v') === WIDGET_ASSET_HASH
+    return staticResponse(
+      request,
+      'js',
+      WIDGET_JS,
+      'text/javascript; charset=utf-8',
+      immutable ? 'public, max-age=31536000, immutable' : 'public, max-age=300, must-revalidate',
+      `W/"${WIDGET_ASSET_HASH}-js"`
+    )
   }
 
   if (url.pathname === '/api/proxy') {

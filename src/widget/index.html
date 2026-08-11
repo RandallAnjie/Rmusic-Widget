@@ -99,8 +99,8 @@
           <div class="hero">
             <div class="hero-copy">
               <p class="eyebrow" id="greeting">欢迎回来</p>
-              <h1>音乐，随时开场。</h1>
-              <p>跨平台搜索、完整歌单、逐字歌词与连续播放，都在一个页面。</p>
+              <h1>想听的，<br />现在就响起。</h1>
+              <p>一个搜索框连接多个音乐平台，按相关度给你最快、最顺手的播放队列。</p>
               <div class="hero-actions">
                 <button class="primary-button" type="button" data-nav="search">
                   <svg class="icon"><use href="#i-search"></use></svg>开始搜索
@@ -109,12 +109,26 @@
                   <svg class="icon"><use href="#i-plus"></use></svg>载入歌单
                 </button>
               </div>
+              <div class="hero-features" aria-label="RMusic 功能">
+                <span><i></i>多平台聚合</span><span>逐字歌词</span><span>连续播放</span>
+              </div>
             </div>
-            <div class="hero-art" aria-hidden="true">
-              <div class="orb orb-a"></div><div class="orb orb-b"></div>
-              <div class="equalizer"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-              <span>PLAY<br />EVERYTHING</span>
-            </div>
+            <article class="home-now-card" id="home-now-card">
+              <div class="home-now-art">
+                <img id="home-now-cover" alt="" hidden />
+                <span id="home-now-fallback">RM</span>
+                <div class="home-now-signal" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+              </div>
+              <div class="home-now-copy">
+                <span class="home-now-kicker" id="home-now-kicker">READY TO PLAY</span>
+                <strong id="home-now-title">下一首，由你决定</strong>
+                <span id="home-now-author">搜索歌曲或载入一个歌单</span>
+              </div>
+              <div class="home-now-progress" aria-hidden="true"><span id="home-now-progress"></span></div>
+              <button class="home-now-action" id="home-now-action" type="button">
+                <svg class="icon" id="home-now-action-icon"><use href="#i-search"></use></svg><span id="home-now-action-label">去搜索</span>
+              </button>
+            </article>
           </div>
 
           <section class="content-section" id="recent-section">
@@ -217,6 +231,30 @@
         </div>
         <button class="icon-button" id="closePanel" type="button" aria-label="关闭面板"><svg class="icon"><use href="#i-close"></use></svg></button>
       </div>
+      <section class="mobile-now-stage" aria-label="正在播放">
+        <div class="mobile-now-backdrop" id="mobile-now-backdrop" aria-hidden="true"></div>
+        <div class="mobile-now-cover">
+          <img id="mobile-now-cover" alt="" hidden />
+          <span id="mobile-now-fallback">RM</span>
+        </div>
+        <div class="mobile-now-meta">
+          <div><strong id="mobile-now-title">选择一首歌</strong><span id="mobile-now-author">从搜索或歌单开始</span></div>
+          <button class="icon-button favorite-action" id="mobile-now-like" type="button" aria-label="喜欢当前歌曲" disabled><svg class="icon"><use href="#i-heart"></use></svg></button>
+        </div>
+        <div class="mobile-now-progress-row">
+          <div id="mobile-progress-bar" class="range-track" role="slider" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
+            <div id="mobile-progress-buffered" class="range-buffered"></div><div id="mobile-progress-fill" class="range-fill"></div><div id="mobile-progress-thumb" class="range-thumb"></div>
+          </div>
+          <div class="mobile-now-times"><span id="mobile-curr-time">0:00</span><span id="mobile-duration">0:00</span></div>
+        </div>
+        <div class="mobile-now-controls">
+          <button id="mobileShuffleBtn" class="transport-button mode-button" type="button" data-mode="off" aria-label="随机播放"><svg class="icon"><use href="#i-shuffle"></use></svg></button>
+          <button id="mobilePrevBtn" class="transport-button" type="button" aria-label="上一首" disabled><svg class="icon"><use href="#i-prev"></use></svg></button>
+          <button id="mobilePlayBtn" class="transport-button play-button" type="button" aria-label="播放" disabled><svg class="icon" id="mobilePlayIcon"><use href="#i-play"></use></svg></button>
+          <button id="mobileNextBtn" class="transport-button" type="button" aria-label="下一首" disabled><svg class="icon"><use href="#i-next"></use></svg></button>
+          <button id="mobileLoopBtn" class="transport-button mode-button" type="button" data-mode="off" aria-label="循环模式"><svg class="icon"><use href="#i-repeat"></use></svg><span class="mode-badge" id="mobileRepeatBadge"></span></button>
+        </div>
+      </section>
       <div class="panel-body panel-page active" id="queue-panel" data-panel-page="queue">
         <div class="panel-now" id="queue-now" hidden>
           <p class="eyebrow">正在播放</p>
@@ -239,7 +277,7 @@
     </aside>
 
     <footer class="player-bar" id="player">
-      <div class="player-track">
+      <div class="player-track" id="player-track" role="button" tabindex="0" aria-label="打开正在播放页面" aria-controls="context-panel" aria-expanded="false">
         <div class="player-cover"><img id="now-cover" alt="" hidden /><span id="now-cover-fallback">RM</span></div>
         <div class="player-meta"><strong id="now-title">选择一首歌</strong><span id="now-author">从搜索或歌单开始</span></div>
         <button class="icon-button heart-button" id="now-like" type="button" aria-label="喜欢当前歌曲" disabled><svg class="icon"><use href="#i-heart"></use></svg></button>
@@ -255,7 +293,7 @@
         </div>
         <div class="progress-row">
           <span id="curr-time" class="time">0:00</span>
-          <div id="progress-bar" class="range-track" role="slider" aria-label="播放进度" tabindex="0">
+          <div id="progress-bar" class="range-track" role="slider" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
             <div id="progress-buffered" class="range-buffered"></div><div id="progress-fill" class="range-fill"></div><div id="progress-thumb" class="range-thumb"></div>
           </div>
           <span id="duration" class="time">0:00</span>
