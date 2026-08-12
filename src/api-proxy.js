@@ -9,6 +9,14 @@ const PUBLIC_ROOT = '/api/proxy/v2'
 const UPSTREAM_ROOT = '/api/v2'
 const PLAYLIST_DISCOVERY_SOURCES = ['netease', 'tencent', 'kugou', 'soda', 'baidu', 'kuwo', 'ytmusic', 'spotify', 'apple']
 const AUDIO_FALLBACK_SOURCES = ['netease', 'ytmusic']
+const DIRECT_REQUEST_HEADERS = [
+  'accept',
+  'authorization',
+  'x-meting-token',
+  'range',
+  'if-none-match',
+  'if-modified-since'
+]
 
 function upstreamUrl (config, resourcePath, searchParams = new URLSearchParams()) {
   const suffix = searchParams.toString()
@@ -38,6 +46,91 @@ export function callUpstreamV2 (config, request, resourcePath, searchParams, ext
   return config.musicApi.binding
     ? config.musicApi.binding.fetch(url, init)
     : fetch(url, init)
+}
+
+function directApiUrl (request, config) {
+  const incoming = new URL(request.url)
+  if (config.musicApi.binding) {
+    // RandallFlare may hand the Worker an internal http: URL even when the
+    // visitor used HTTPS. Force the public scheme so Meting emits usable
+    // same-origin links in its REST envelope.
+    return `https://${incoming.host}${incoming.pathname}${incoming.search}`
+  }
+  return `${config.musicApi.url}${incoming.pathname}${incoming.search}`
+}
+
+function directInit (request) {
+  const headers = new Headers()
+  for (const name of DIRECT_REQUEST_HEADERS) {
+    const value = request.headers.get(name)
+    if (value) headers.set(name, value)
+  }
+  return {
+    method: request.method,
+    headers,
+    redirect: 'manual'
+  }
+}
+
+function rewriteDirectApiLinks (value, publicOrigin) {
+  if (Array.isArray(value)) {
+    return value.map((item) => rewriteDirectApiLinks(item, publicOrigin))
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, rewriteDirectApiLinks(item, publicOrigin)])
+    )
+  }
+  if (typeof value !== 'string' || !value.includes('/api/v2')) return value
+  try {
+    const url = new URL(value)
+    const rootIndex = url.pathname.lastIndexOf('/api/v2')
+    if (rootIndex < 0) return value
+    url.searchParams.delete('token')
+    url.searchParams.delete('auth')
+    return `${publicOrigin}${url.pathname.slice(rootIndex)}${url.search}`
+  } catch {
+    return value
+  }
+}
+
+async function directResponse (upstream, publicOrigin, headOnly) {
+  const contentType = upstream.headers.get('content-type') || ''
+  if (!headOnly && /(?:application\/json|application\/problem\+json)/i.test(contentType)) {
+    const raw = await upstream.text()
+    try {
+      const payload = rewriteDirectApiLinks(JSON.parse(raw), publicOrigin)
+      const headers = new Headers(upstream.headers)
+      headers.delete('content-encoding')
+      headers.delete('content-length')
+      headers.delete('transfer-encoding')
+      return new Response(JSON.stringify(payload), { status: upstream.status, headers })
+    } catch {
+      const headers = new Headers(upstream.headers)
+      headers.delete('content-encoding')
+      headers.delete('content-length')
+      headers.delete('transfer-encoding')
+      return new Response(raw, { status: upstream.status, headers })
+    }
+  }
+  return passThrough(upstream, headOnly)
+}
+
+/**
+ * Same-origin public V2 surface for music.bigrandall.io.
+ *
+ * Unlike the widget-only /api/proxy/v2 route, this path never injects the
+ * server-side MUSIC_API_TOKEN. Authentication remains the caller's
+ * responsibility and is enforced by Meting itself.
+ */
+export async function passThroughApiV2 (request, config) {
+  const incoming = new URL(request.url)
+  const url = directApiUrl(request, config)
+  const init = directInit(request)
+  const upstream = config.musicApi.binding
+    ? await config.musicApi.binding.fetch(url, init)
+    : await fetch(url, init)
+  return directResponse(upstream, `https://${incoming.host}`, request.method === 'HEAD')
 }
 
 function encodePath (value) {
@@ -456,12 +549,12 @@ function notFound (pathname) {
   })
 }
 
-function passThrough (upstream) {
+function passThrough (upstream, headOnly = false) {
   const headers = new Headers()
   for (const [key, value] of upstream.headers) {
     const name = key.toLowerCase()
     if (name === 'content-encoding' || name === 'transfer-encoding') continue
     headers.set(key, value)
   }
-  return new Response(upstream.body, { status: upstream.status, headers })
+  return new Response(headOnly ? null : upstream.body, { status: upstream.status, headers })
 }

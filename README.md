@@ -26,6 +26,11 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 4. 聚合与单平台搜索统一由 Meting V2 完成，前端直接消费相关度排序后的 `{ data, meta, links }` 响应。
 5. 每 IP、每 isolate 有滑动窗口限流，默认 `180` 次/分钟。
 
+站点同时暴露与 Meting 一致的 `/api/v2/*` REST 路径，方便以
+`music.bigrandall.io` 作为 API 域名。该路径不会注入服务端密钥，调用者仍必须在
+每次请求中发送 `Authorization: Bearer <METING_TOKEN>`、`X-Meting-Token` 或兼容的
+`?token=`；上游返回的资源链接会改写为 `https://music.bigrandall.io/api/v2/*`。
+
 ## 路由
 
 | Path | 用途 |
@@ -33,6 +38,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | `GET /` | RMusic 单页应用 |
 | `GET /widget.css` | 浏览器缓存的应用样式 |
 | `GET /widget.js` | 浏览器缓存的应用控制器 |
+| `GET /api/v2/*` | 严格 token 鉴权的同源 Meting V2 API |
 | `GET /api/proxy/v2/tracks?query=…&source=all` | V2 聚合或单平台搜索 |
 | `GET /api/proxy/v2/playlists/{source}/{id}` | V2 歌单详情、创建人、介绍、封面和分页曲目 |
 | `GET /api/proxy/v2/streams/{source}/{id}` | V2 音频流代理 |
