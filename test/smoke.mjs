@@ -80,8 +80,27 @@ const env = {
       const url = new URL(input)
       calls.push({ url, init })
       assert.match(url.pathname, /^\/api\/v2(?:\/|$)/)
-      assert.equal(new Headers(init.headers).get('authorization'), 'Bearer server-only-secret')
-      assert.equal(url.searchParams.has('token'), false)
+      const headers = new Headers(init.headers)
+      const authenticated =
+        headers.get('authorization') === 'Bearer server-only-secret' ||
+        headers.get('x-meting-token') === 'server-only-secret' ||
+        url.searchParams.get('token') === 'server-only-secret'
+      if (!authenticated) {
+        return Response.json({
+          type: 'about:blank',
+          title: 'HTTPException',
+          status: 401,
+          detail: 'V2 API 需要 token',
+          apiVersion: '2'
+        }, {
+          status: 401,
+          headers: {
+            'content-type': 'application/problem+json',
+            'www-authenticate': 'Bearer realm="Meting API V2"',
+            'cache-control': 'no-store'
+          }
+        })
+      }
 
       if (url.pathname === '/api/v2/sources') {
         return Response.json(envelope([
@@ -203,6 +222,29 @@ assert.equal(freshCss.status, 304)
 const js = await request('/widget.js')
 assert.match(js.headers.get('content-type'), /javascript/)
 assert.match(await js.text(), /rmusic_favorites_v2/)
+
+const directUnauthenticated = await request('/api/v2/sources')
+assert.equal(directUnauthenticated.status, 401)
+assert.match(directUnauthenticated.headers.get('www-authenticate'), /^Bearer/)
+assert.equal((await directUnauthenticated.json()).apiVersion, '2')
+assert.equal(new Headers(calls.at(-1).init.headers).has('authorization'), false)
+
+const directBearer = await request('/api/v2/sources', {
+  headers: { authorization: 'Bearer server-only-secret' }
+})
+assert.equal(directBearer.status, 200)
+const directSource = (await directBearer.json()).data[0]
+assert.equal(directSource.links.self, 'https://rmusic.test/api/v2/sources/netease')
+assert.equal(new Headers(calls.at(-1).init.headers).get('authorization'), 'Bearer server-only-secret')
+
+const directHeaderToken = await request('/api/v2/sources', {
+  headers: { 'x-meting-token': 'server-only-secret' }
+})
+assert.equal(directHeaderToken.status, 200)
+
+const directQueryToken = await request('/api/v2?token=server-only-secret')
+assert.equal(directQueryToken.status, 200)
+assert.equal(calls.at(-1).url.searchParams.get('token'), 'server-only-secret')
 
 const search = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=netease')
 assert.equal(search.status, 200)
