@@ -29,7 +29,8 @@ RATE_MAX=180
 - 中央内容区和固定底部播放器
 - 搜索会自动聚合各平台、按相关度排序，并可连续播放整个结果列表
 - 搜索页可切换到任一单独平台；切换后会用当前关键词立即重搜
-- 通过“添加歌单”粘贴分享链接或输入歌单 ID，可自动识别平台并保存
+- 所有数据请求均走 `/api/proxy/v2`，上游只调用 Meting `/api/v2`
+- 通过“添加歌单”粘贴分享链接或输入歌单 ID，可自动识别平台，并显示 V2 返回的名称、封面、介绍和创建人
 - 桌面端右侧队列和逐字歌词面板可正常打开
 - 手机点击底部歌曲信息可展开完整 Now Playing 页面，并切换歌词与队列
 - `widget.css` / `widget.js` 的 hash URL 返回 `immutable` 缓存，支持 Brotli/Gzip
@@ -51,4 +52,4 @@ RATE_MAX=180
 - 封面或音频 404：对应平台可能没有该资源、歌曲下架或需要有效会员 cookie。
 - Tencent 返回 `vkey 全部 quality 都被拒`：通常是 QQ 音乐账号无对应权益、cookie 状态异常或 Worker 出口受地域限制。新版代理会严格匹配同曲后回退到网易云 / YouTube Music；响应头 `X-RMusic-Fallback` 表示实际采用的音源。仍返回 403 时应刷新 Tencent cookie、确认账号会员权益或调整 Meting-API 出口。
 
-浏览器看到的所有资源 URL 都应以本站 `/api/proxy` 开头；如果 Network 面板出现带 Meting `auth` 的跨域 URL，说明 JSON 重写逻辑出现回归。
+浏览器看到的所有资源 URL 都应以本站 `/api/proxy/v2` 开头；如果 Network 面板出现带 Meting `auth` 的跨域 URL，说明 V2 links 重写逻辑出现回归。

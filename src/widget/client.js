@@ -1,6 +1,6 @@
 /* RMusic full-page player.
  *
- * The browser only calls the same-origin /api/proxy surface. The
+ * The browser only calls the same-origin /api/proxy/v2 REST surface. The
  * worker injects MUSIC_API_TOKEN server-side and rewrites every
  * resource URL, so playlists, covers, audio and lyrics never expose
  * the Meting master token to the page.
@@ -11,10 +11,9 @@
 
   const $ = (id) => document.getElementById(id)
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector))
-  const API = '/api/proxy'
-  const SEARCH_SERVERS = ['netease', 'kugou', 'apple', 'ytmusic', 'tencent', 'kuwo', 'baidu']
+  const API = '/api/proxy/v2'
   const SEARCH_PLATFORM_IDS = ['aggregate', 'tencent', 'netease', 'kugou', 'soda', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']
-  const SEARCH_SOURCE_TIMEOUT_MS = 5000
+  const SEARCH_REQUEST_TIMEOUT_MS = 12000
 
   const els = {
     app: $('app'),
@@ -192,7 +191,7 @@
     if (!value || track.server !== 'tencent') return value
     try {
       const parsed = new URL(value, location.href)
-      if (parsed.origin !== location.origin || parsed.pathname !== API) return value
+      if (parsed.origin !== location.origin || !parsed.pathname.startsWith(API + '/streams/')) return value
       if (!parsed.searchParams.get('title') && track.title) parsed.searchParams.set('title', track.title.slice(0, 160))
       if (!parsed.searchParams.get('author') && track.author) parsed.searchParams.set('author', track.author.slice(0, 160))
       return parsed.pathname + '?' + parsed.searchParams.toString()
@@ -201,17 +200,45 @@
     }
   }
 
+  function migrateLegacyResourceUrl (value, fallbackServer) {
+    if (!value) return ''
+    try {
+      const parsed = new URL(value, location.href)
+      if (parsed.pathname !== '/api/proxy' && !parsed.pathname.endsWith('/api')) return value
+      const legacyType = parsed.searchParams.get('type')
+      const id = parsed.searchParams.get('id')
+      const server = parsed.searchParams.get('server') || fallbackServer
+      const resource = legacyType === 'url'
+        ? 'streams'
+        : legacyType === 'pic'
+          ? 'artworks'
+          : (legacyType === 'lrc' || legacyType === 'lrcpword' ? 'lyrics' : '')
+      if (!resource || !id || !server) return value
+      const suffix = legacyType === 'lrcpword' ? '?granularity=word' : ''
+      return API + '/' + resource + '/' + encodeURIComponent(server) + '/' + encodeURIComponent(id) + suffix
+    } catch {
+      return value
+    }
+  }
+
   function normalizeTrack (track, server) {
     const out = { ...track }
-    out.server = track.server || server || 'netease'
+    out.server = track.source || track.server || server || 'netease'
     out.title = text(track.title, '未知歌曲')
-    out.author = text(track.author, '未知艺人')
-    out.album = text(track.album, '')
-    out.url = audioUrlWithHints(text(track.url, ''), out)
-    out.pic = text(track.pic, '')
-    out.lrc = text(track.lrc, '')
-    out.lrcpword = text(track.lrcpword, '')
-    if (typeof track.duration_ms !== 'number') out.duration_ms = null
+    out.author = text(
+      Array.isArray(track.artists)
+        ? track.artists.map((artist) => artist?.name || artist).filter(Boolean).join(' / ')
+        : track.author,
+      '未知艺人'
+    )
+    out.album = text(track.album?.name || track.album, '')
+    out.url = audioUrlWithHints(migrateLegacyResourceUrl(text(track.links?.stream || track.url, ''), out.server), out)
+    out.pic = migrateLegacyResourceUrl(text(track.artwork?.url || track.links?.artwork || track.pic, ''), out.server)
+    out.lrc = migrateLegacyResourceUrl(text(track.links?.lyrics || track.lrc, ''), out.server)
+    out.lrcpword = migrateLegacyResourceUrl(text(track.links?.wordLyrics || track.lrcpword, ''), out.server)
+    out.duration_ms = typeof track.durationMs === 'number'
+      ? track.durationMs
+      : (typeof track.duration_ms === 'number' ? track.duration_ms : null)
     return out
   }
 
@@ -273,115 +300,20 @@
     if (status === 429) return '请求太频繁，请稍后再试'
     let parsed = null
     try { parsed = JSON.parse(body) } catch {}
-    return parsed?.message || body.slice(0, 180) || ('请求失败 (' + status + ')')
+    return parsed?.detail || parsed?.message || body.slice(0, 180) || ('请求失败 (' + status + ')')
   }
 
-  async function fetchTracks (type, id, server = 'aggregate', signal) {
-    const params = new URLSearchParams({ server, type, id: String(id) })
-    const response = await fetch(API + '?' + params, { headers: { accept: 'application/json' }, signal })
+  async function fetchV2 (path, params, signal) {
+    const query = params ? new URLSearchParams(params).toString() : ''
+    const response = await fetch(API + path + (query ? '?' + query : ''), {
+      headers: { accept: 'application/json' },
+      signal
+    })
     if (!response.ok) {
       const body = await response.text().catch(() => '')
       throw new Error(apiErrorMessage(response.status, body))
     }
-    return normalizeList(await response.json(), server)
-  }
-
-  function normaliseMatchText (value) {
-    return String(value || '')
-      .normalize('NFKC')
-      .toLocaleLowerCase('zh-CN')
-      .replace(/[^\p{L}\p{N}]+/gu, '')
-  }
-
-  function editDistance (left, right, limit = 2) {
-    const a = Array.from(left)
-    const b = Array.from(right)
-    if (Math.abs(a.length - b.length) > limit) return limit + 1
-    let previous = b.map((_, index) => index + 1)
-    previous.unshift(0)
-    for (let row = 1; row <= a.length; row++) {
-      const current = [row]
-      let rowMinimum = row
-      for (let column = 1; column <= b.length; column++) {
-        const value = Math.min(
-          current[column - 1] + 1,
-          previous[column] + 1,
-          previous[column - 1] + (a[row - 1] === b[column - 1] ? 0 : 1)
-        )
-        current.push(value)
-        rowMinimum = Math.min(rowMinimum, value)
-      }
-      if (rowMinimum > limit) return limit + 1
-      previous = current
-    }
-    return previous[b.length]
-  }
-
-  function searchTokens (value) {
-    return String(value || '')
-      .normalize('NFKC')
-      .toLocaleLowerCase('zh-CN')
-      .replace(/[^\p{L}\p{N}]+/gu, ' ')
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean)
-  }
-
-  function fieldMatchScore (field, wanted) {
-    if (!field || !wanted) return 0
-    if (field === wanted) return 120
-    if (wanted.length >= 3 && editDistance(field, wanted, 2) <= 2) return 105
-    if (field.startsWith(wanted)) return 82
-    if (field.includes(wanted)) return 68
-    if (wanted.includes(field) && field.length >= 2) return 48
-    return 0
-  }
-
-  function searchRelevance (track, query, sourceIndex, rowIndex) {
-    const wanted = normaliseMatchText(query)
-    const title = normaliseMatchText(track.title)
-    const author = normaliseMatchText(track.author)
-    const album = normaliseMatchText(track.album)
-    const combined = title + author + album
-    let score = fieldMatchScore(title, wanted) * 3
-    score += fieldMatchScore(author, wanted) * 2
-    score += fieldMatchScore(album, wanted)
-    if (wanted && combined.includes(wanted)) score += 110
-    for (const token of searchTokens(query)) {
-      const normalised = normaliseMatchText(token)
-      score += Math.max(
-        fieldMatchScore(title, normalised) * 1.5,
-        fieldMatchScore(author, normalised) * 1.2,
-        fieldMatchScore(album, normalised) * 0.55
-      )
-    }
-    score -= rowIndex * 0.35
-    score -= sourceIndex * 0.02
-    return score
-  }
-
-  function rankSearchGroups (groups, query) {
-    const ranked = []
-    groups.forEach((rows, sourceIndex) => {
-      if (!rows) return
-      rows.forEach((track, rowIndex) => {
-        if (!track?.url || !normaliseMatchText(track.title)) return
-        ranked.push({ track, sourceIndex, rowIndex, score: searchRelevance(track, query, sourceIndex, rowIndex) })
-      })
-    })
-    ranked.sort((left, right) => right.score - left.score || left.rowIndex - right.rowIndex || left.sourceIndex - right.sourceIndex)
-    const seen = new Set()
-    const output = []
-    for (const item of ranked) {
-      const title = normaliseMatchText(item.track.title)
-      const author = normaliseMatchText(item.track.author)
-      const key = author ? title + '|' + author : item.track.server + '|' + item.track.url
-      if (seen.has(key)) continue
-      seen.add(key)
-      output.push(item.track)
-      if (output.length >= 80) break
-    }
-    return output
+    return response.json()
   }
 
   function cancelActiveSearch () {
@@ -389,56 +321,21 @@
     activeSearchControllers = []
   }
 
-  async function progressiveSearch (query, onUpdate) {
-    cancelActiveSearch()
-    const controllers = SEARCH_SERVERS.map(() => new AbortController())
-    activeSearchControllers = controllers
-    const groups = Array(SEARCH_SERVERS.length)
-    let completed = 0
-    let successful = 0
-    let latest = []
-    let updateTimer = 0
-
-    const publish = (pending) => onUpdate(latest, completed, SEARCH_SERVERS.length, pending)
-    const tasks = SEARCH_SERVERS.map(async (server, sourceIndex) => {
-      const controller = controllers[sourceIndex]
-      const timer = setTimeout(() => controller.abort(), SEARCH_SOURCE_TIMEOUT_MS)
-      try {
-        groups[sourceIndex] = await fetchTracks('search', query, server, controller.signal)
-        successful += 1
-      } catch {
-        groups[sourceIndex] = []
-      } finally {
-        clearTimeout(timer)
-        completed += 1
-        latest = rankSearchGroups(groups, query)
-        if (latest.length && !updateTimer) {
-          updateTimer = setTimeout(() => {
-            updateTimer = 0
-            publish(true)
-          }, 80)
-        }
-      }
-    })
-
-    await Promise.all(tasks)
-    if (updateTimer) clearTimeout(updateTimer)
-    if (activeSearchControllers === controllers) activeSearchControllers = []
-    if (!successful) throw new Error('搜索暂时不可用，请稍后再试')
-    publish(false)
-    return latest
-  }
-
-  async function platformSearch (query, server, onUpdate) {
+  async function searchV2 (query, server) {
     cancelActiveSearch()
     const controller = new AbortController()
     activeSearchControllers = [controller]
-    const timer = setTimeout(() => controller.abort(), SEARCH_SOURCE_TIMEOUT_MS)
+    const timer = setTimeout(() => controller.abort(), SEARCH_REQUEST_TIMEOUT_MS)
     try {
-      const rows = await fetchTracks('search', query, server, controller.signal)
-      const results = rankSearchGroups([rows], query)
-      onUpdate(results, 1, 1, false)
-      return results
+      const payload = await fetchV2('/tracks', {
+        query,
+        source: server === 'aggregate' ? 'all' : server,
+        limit: '80'
+      }, controller.signal)
+      return {
+        tracks: normalizeList(payload?.data, server),
+        meta: payload?.meta || {}
+      }
     } finally {
       clearTimeout(timer)
       if (activeSearchControllers[0] === controller) activeSearchControllers = []
@@ -507,26 +404,27 @@
     if (rerun && els.query.value.trim()) runSearch()
   }
 
-  function renderSearchState (query, results, completed, total, pending, server = state.searchServer) {
+  function renderSearchState (query, results, meta = {}, server = state.searchServer) {
     state.searchResults = results
     const aggregate = server === 'aggregate'
+    const sourceResults = Array.isArray(meta.sources) ? meta.sources : []
+    const completed = sourceResults.filter((item) => item.status === 'fulfilled').length
+    const total = sourceResults.length
     renderTrackRows(els.searchResults, results, (aggregate ? '聚合搜索：' : sourceName(server) + '：') + query)
     els.searchCount.textContent = results.length + ' 首歌曲'
     if (!aggregate) {
       els.searchSummary.textContent = results.length
         ? `${sourceName(server)} · ${results.length} 首结果 · 已按相关度排序`
         : `${sourceName(server)}没有找到结果，试试其他关键词或切换平台。`
-    } else if (pending) {
-      els.searchSummary.textContent = `已聚合 ${completed}/${total} 个平台 · ${results.length} 首结果 · 正在继续补充并重排`
     } else {
       els.searchSummary.textContent = results.length
-        ? `聚合完成 · ${completed} 个平台已响应 · 已按相关度排序`
+        ? `聚合完成 · ${completed || total} 个平台已响应 · ${results.length} 首结果 · 已按相关度排序`
         : '没有找到结果，试试更短或更具体的关键词。'
     }
     els.searchResultsWrap.hidden = results.length === 0
-    els.searchEmpty.hidden = pending || results.length !== 0
+    els.searchEmpty.hidden = results.length !== 0
     if (results.length) els.searchLoading.hidden = true
-    if (!pending && results.length === 0) {
+    if (results.length === 0) {
       els.searchEmpty.querySelector('h2').textContent = '没有找到匹配歌曲'
       els.searchEmpty.querySelector('p').textContent = aggregate
         ? '换个关键词，或者同时输入歌曲名和歌手名。'
@@ -556,12 +454,9 @@
     els.searchLoading.hidden = false
     const requestId = ++searchRequestId
     try {
-      const search = aggregate ? progressiveSearch : (value, onUpdate) => platformSearch(value, searchServer, onUpdate)
-      await search(query, (partial, completed, total, pending) => {
-        if (requestId !== searchRequestId) return
-        renderSearchState(query, partial, completed, total, pending, searchServer)
-      })
+      const result = await searchV2(query, searchServer)
       if (requestId !== searchRequestId) return
+      renderSearchState(query, result.tracks, result.meta, searchServer)
     } catch (error) {
       if (requestId !== searchRequestId) return
       state.searchResults = []
@@ -868,7 +763,15 @@
   })
 
   function savePlaylistDefinition (playlist) {
-    const value = { server: playlist.server, id: String(playlist.id), name: playlist.name || ('歌单 ' + playlist.id), savedAt: Date.now() }
+    const value = {
+      server: playlist.server,
+      id: String(playlist.id),
+      name: playlist.name || ('歌单 ' + playlist.id),
+      cover: playlist.cover || '',
+      description: playlist.description || '',
+      creator: playlist.creator || null,
+      savedAt: Date.now()
+    }
     state.playlists = [value, ...state.playlists.filter((item) => playlistKey(item) !== playlistKey(value))].slice(0, 60)
     writeJson(STORAGE.playlists, state.playlists)
     renderSavedPlaylists()
@@ -913,12 +816,21 @@
       const art = document.createElement('div')
       art.className = 'playlist-art'
       art.textContent = initials(playlist.name)
+      if (playlist.cover) {
+        const image = document.createElement('img')
+        image.loading = 'lazy'
+        image.decoding = 'async'
+        image.src = playlist.cover
+        image.alt = ''
+        image.addEventListener('error', () => image.remove())
+        art.appendChild(image)
+      }
       const copy = document.createElement('div')
       copy.className = 'playlist-copy'
       const name = document.createElement('strong')
       name.textContent = playlist.name
       const meta = document.createElement('span')
-      meta.textContent = sourceName(playlist.server) + ' · 在线歌单'
+      meta.textContent = [sourceName(playlist.server), playlist.creator?.name].filter(Boolean).join(' · ') || '在线歌单'
       copy.append(name, meta)
       const remove = document.createElement('button')
       remove.type = 'button'
@@ -938,6 +850,29 @@
     return labels[server] || server
   }
 
+  async function fetchPlaylistV2 (playlist) {
+    let source = playlist.server || 'aggregate'
+    let offset = 0
+    const limit = 100
+    const tracks = []
+    let metadata = null
+    for (let page = 0; page < 100; page += 1) {
+      const path = '/playlists/' + encodeURIComponent(source) + '/' + encodeURIComponent(String(playlist.id))
+      const payload = await fetchV2(path, { offset: String(offset), limit: String(limit) })
+      const data = payload?.data
+      if (!data || typeof data !== 'object') throw new Error('歌单返回格式异常')
+      if (!metadata) {
+        metadata = data
+        if (source === 'aggregate' && data.source) source = data.source
+      }
+      const pageTracks = normalizeList(data.tracks?.items, data.source || source)
+      tracks.push(...pageTracks)
+      if (!data.tracks?.hasMore || !pageTracks.length) break
+      offset += pageTracks.length
+    }
+    return { metadata: metadata || {}, tracks }
+  }
+
   async function loadPlaylist (playlist) {
     const requestId = ++collectionRequestId
     const collection = { ...playlist, tracks: [] }
@@ -947,13 +882,18 @@
     els.collectionLoading.hidden = false
     els.collectionTracks.innerHTML = ''
     try {
-      const tracks = await fetchTracks('playlist', playlist.id, playlist.server)
+      const result = await fetchPlaylistV2(playlist)
       if (requestId !== collectionRequestId) return false
-      collection.tracks = tracks
-      if (collection.server === 'aggregate' && tracks[0]?.server) collection.server = tracks[0].server
+      collection.tracks = result.tracks
+      collection.server = result.metadata.source || collection.server
+      collection.name = result.metadata.name || collection.name
+      collection.cover = result.metadata.cover || ''
+      collection.description = result.metadata.description || ''
+      collection.creator = result.metadata.creator || null
+      collection.stats = result.metadata.stats || null
       renderCollectionHeader()
-      renderTrackRows(els.collectionTracks, tracks, playlist.name)
-      if (!tracks.length) toast('歌单没有返回曲目', 'error')
+      renderTrackRows(els.collectionTracks, collection.tracks, collection.name)
+      if (!collection.tracks.length) toast('歌单没有返回曲目', 'error')
       return collection
     } catch (error) {
       if (requestId !== collectionRequestId) return false
@@ -972,13 +912,16 @@
     if (!collection) return
     els.collectionKind.textContent = sourceName(collection.server) + ' 歌单'
     els.collectionTitle.textContent = collection.name || ('歌单 ' + collection.id)
-    els.collectionDescription.textContent = '来自 ' + sourceName(collection.server) + ' · 在线获取最新曲目'
-    els.collectionCount.textContent = collection.tracks.length ? collection.tracks.length + ' 首歌曲' : '正在载入曲目'
+    const creator = collection.creator?.name ? '创建人：' + collection.creator.name : ''
+    els.collectionDescription.textContent = collection.description || creator || ('来自 ' + sourceName(collection.server) + ' · 在线获取最新曲目')
+    const total = collection.stats?.trackCount || collection.tracks.length
+    els.collectionCount.textContent = total ? total + ' 首歌曲' : '正在载入曲目'
     els.collectionCover.innerHTML = ''
-    if (collection.tracks[0]?.pic) {
+    const cover = collection.cover || collection.tracks[0]?.pic
+    if (cover) {
       const image = document.createElement('img')
       image.decoding = 'async'
-      image.src = collection.tracks[0].pic
+      image.src = cover
       image.alt = ''
       image.addEventListener('error', () => { image.remove(); els.collectionCover.textContent = initials(collection.name) })
       els.collectionCover.appendChild(image)

@@ -4,7 +4,7 @@
 //   GET /                  → serves the widget shell
 //   GET /widget.css        → CSS (separate file = browser-cacheable)
 //   GET /widget.js         → client-side JS (same)
-//   GET /api/proxy?…       → forwards to the Meting-API binding,
+//   GET /api/proxy/v2/…    → REST proxy for the Meting API V2,
 //                            injecting the master token server-side
 //                            and rate-limiting per client IP.
 //
@@ -17,7 +17,7 @@
 
 import { buildConfig } from './config.js'
 import { checkRate, clientIp } from './rate-limit.js'
-import { proxyApi } from './api-proxy.js'
+import { proxyApiV2 } from './api-proxy.js'
 
 // Build-time string constants. build.mjs passes the contents of
 // src/widget/{index.html,index.css,client.js} through esbuild's
@@ -41,7 +41,7 @@ const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, HEAD, OPTIONS',
   'access-control-allow-headers': 'Content-Type, Range',
-  'access-control-expose-headers': 'Content-Range, X-RateLimit-Limit, X-RateLimit-Remaining, X-RMusic-Fallback, X-RMusic-Original-Server, X-RMusic-Sources',
+  'access-control-expose-headers': 'Content-Range, X-RateLimit-Limit, X-RateLimit-Remaining, X-RMusic-Api-Version, X-RMusic-Fallback, X-RMusic-Original-Server, X-RMusic-Sources',
   'access-control-max-age': '86400'
 }
 
@@ -149,7 +149,7 @@ async function route (request, env) {
     )
   }
 
-  if (url.pathname === '/api/proxy') {
+  if (url.pathname === '/api/proxy/v2' || url.pathname.startsWith('/api/proxy/v2/')) {
     // Apply the per-IP rate limit before doing any upstream work.
     // 429 is cheap; an upstream call to Meting-API + audio bytes is
     // expensive and counts against the operator's egress budget.
@@ -178,26 +178,18 @@ async function route (request, env) {
       return plain(
         500,
         'rmusic-widget: MUSIC_API_TOKEN env binding is required (master token used ' +
-          'to sign search/song/playlist responses upstream).\n'
+          'to authorize Meting V2 requests upstream).\n'
       )
     }
 
-    const params = {
-      server: url.searchParams.get('server') || 'aggregate',
-      type: url.searchParams.get('type') || 'search',
-      id: url.searchParams.get('id') ?? '',
-      r: url.searchParams.get('r') ?? undefined,
-      title: url.searchParams.get('title') ?? '',
-      author: url.searchParams.get('author') ?? ''
-    }
-    // Rewriting emits relative paths (`/api/proxy?...`) so the
+    // Rewriting emits relative paths (`/api/proxy/v2/...`) so the
     // browser resolves them against whatever origin the page itself
     // loaded from. No `url.origin` to guess — sidesteps the
     // bigrandall edge's HTTP-to-worker forwarding that makes
     // request.url's protocol look like plain `http:` even on HTTPS
     // visitors (which used to be a mixed-content trap when the
     // rewritten audio src ended up `http://…`).
-    const response = await proxyApi(request, config, params)
+    const response = await proxyApiV2(request, config)
     // Stamp the rate-limit headers on success too, so a polite
     // client can pace itself rather than wait for a 429.
     const out = new Headers(response.headers)

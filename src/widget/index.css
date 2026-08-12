@@ -428,6 +428,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .playlist-card { min-width: 0; display: grid; grid-template-columns: 64px minmax(0, 1fr) 28px; align-items: center; gap: 13px; padding: 12px; border: 1px solid var(--line); background: rgba(255,255,255,.035); border-radius: 14px; cursor: pointer; text-align: left; transition: background 180ms var(--curve-standard), transform 260ms var(--curve-spring), border-color 180ms var(--curve-standard); animation: item-rise 440ms var(--curve-enter) both; animation-delay: calc(var(--item-index, 0) * 36ms); }
 .playlist-card:hover { background: var(--surface-3); transform: translateY(-2px); }
 .playlist-art { width: 64px; height: 64px; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(145deg, #39444f, #1e2228); color: var(--accent); font-size: 23px; font-weight: 900; }
+.playlist-art img { grid-area: 1 / 1; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
 .playlist-copy { min-width: 0; }
 .playlist-copy strong, .playlist-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-copy strong { font-size: 14px; color: var(--text); }.playlist-copy span { margin-top: 6px; color: var(--muted); font-size: 11px; }
