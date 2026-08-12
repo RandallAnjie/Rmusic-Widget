@@ -442,6 +442,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .collection-byline strong { color: var(--text); }.mini-brand { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 900; }
 .collection-toolbar { display: flex; align-items: center; gap: 12px; margin: 8px 0 20px; }
 .like-collection { width: 46px; height: 46px; border: 1px solid var(--line-strong); }.like-collection.saved { color: var(--accent); }.like-collection.saved .icon { fill: currentColor; }
+.collection-refresh { min-height: 42px; margin-left: 2px; padding-inline: 15px; }
+.collection-refresh.refreshing .icon { animation: refresh-spin 780ms var(--curve-standard) infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
 
 .skeleton-list { display: grid; gap: 8px; padding-top: 20px; }
 .skeleton-list::before, .skeleton-list::after { content: ""; height: 62px; border-radius: 10px; background: linear-gradient(90deg, rgba(255,255,255,.04), rgba(255,255,255,.1), rgba(255,255,255,.04)); background-size: 200% 100%; animation: skeleton 1.2s var(--curve-emphasized) infinite; box-shadow: 0 70px 0 rgba(255,255,255,.04), 0 140px 0 rgba(255,255,255,.035), 0 210px 0 rgba(255,255,255,.03); }
