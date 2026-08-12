@@ -13,6 +13,7 @@
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector))
   const API = '/api/proxy'
   const SEARCH_SERVERS = ['netease', 'kugou', 'apple', 'ytmusic', 'tencent', 'kuwo', 'baidu']
+  const SEARCH_PLATFORM_IDS = ['aggregate', 'tencent', 'netease', 'kugou', 'soda', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']
   const SEARCH_SOURCE_TIMEOUT_MS = 5000
 
   const els = {
@@ -38,6 +39,8 @@
     recentGrid: $('recent-grid'),
     favoritePreview: $('favorite-preview'),
     favoritePreviewSection: $('favorite-preview-section'),
+    searchEyebrow: $('search-eyebrow'),
+    searchSourcePicker: $('search-source-picker'),
     searchTitle: $('search-title'),
     searchSummary: $('search-summary'),
     searchEmpty: $('search-empty'),
@@ -125,12 +128,14 @@
     recent: 'rmusic_recent_v2',
     playlists: 'rmusic_playlists_v2',
     modes: 'rmusic_playback_mode',
-    volume: 'rmusic_volume_v2'
+    volume: 'rmusic_volume_v2',
+    searchServer: 'rmusic_search_server_v1'
   }
 
   const state = {
     view: 'home',
     searchResults: [],
+    searchServer: SEARCH_PLATFORM_IDS.includes(readStorage(STORAGE.searchServer)) ? readStorage(STORAGE.searchServer) : 'aggregate',
     collection: null,
     queue: [],
     queueIndex: -1,
@@ -379,8 +384,13 @@
     return output
   }
 
-  async function progressiveSearch (query, onUpdate) {
+  function cancelActiveSearch () {
     activeSearchControllers.forEach((controller) => controller.abort())
+    activeSearchControllers = []
+  }
+
+  async function progressiveSearch (query, onUpdate) {
+    cancelActiveSearch()
     const controllers = SEARCH_SERVERS.map(() => new AbortController())
     activeSearchControllers = controllers
     const groups = Array(SEARCH_SERVERS.length)
@@ -419,10 +429,27 @@
     return latest
   }
 
+  async function platformSearch (query, server, onUpdate) {
+    cancelActiveSearch()
+    const controller = new AbortController()
+    activeSearchControllers = [controller]
+    const timer = setTimeout(() => controller.abort(), SEARCH_SOURCE_TIMEOUT_MS)
+    try {
+      const rows = await fetchTracks('search', query, server, controller.signal)
+      const results = rankSearchGroups([rows], query)
+      onUpdate(results, 1, 1, false)
+      return results
+    } finally {
+      clearTimeout(timer)
+      if (activeSearchControllers[0] === controller) activeSearchControllers = []
+    }
+  }
+
   /* ---------- Navigation ---------- */
 
   function showView (name) {
     const target = name === 'collection' ? 'collection' : ['home', 'search', 'library'].includes(name) ? name : 'home'
+    const previous = state.view
     state.view = target
     $$('.view').forEach((view) => {
       const active = view.dataset.view === target
@@ -434,7 +461,7 @@
     if (scroll) scroll.scrollTop = 0
     if (target === 'home') renderHome()
     if (target === 'library') renderLibrary()
-    if (target === 'search') setTimeout(() => els.query.focus(), 80)
+    if (target === 'search' && previous !== 'search') setTimeout(() => els.query.focus(), 80)
   }
 
   $$('[data-nav]').forEach((button) => button.addEventListener('click', () => showView(button.dataset.nav)))
@@ -446,11 +473,50 @@
 
   /* ---------- Search ---------- */
 
-  function renderSearchState (query, results, completed, total, pending) {
+  function syncSearchSourcePicker () {
+    $$('[data-search-server]', els.searchSourcePicker).forEach((button) => {
+      const active = button.dataset.searchServer === state.searchServer
+      button.classList.toggle('active', active)
+      button.setAttribute('aria-checked', String(active))
+      button.tabIndex = active ? 0 : -1
+      if (active) button.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    })
+  }
+
+  function updateSearchPrompt () {
+    const aggregate = state.searchServer === 'aggregate'
+    els.searchEyebrow.textContent = aggregate ? '跨平台检索' : '单平台检索 · ' + sourceName(state.searchServer)
+    if (!els.query.value.trim() && !state.searchResults.length) {
+      els.searchSummary.textContent = aggregate
+        ? '搜索会自动聚合多个音乐平台，并按关键词相关度排序。'
+        : '搜索结果将只来自 ' + sourceName(state.searchServer) + '。'
+    }
+  }
+
+  function selectSearchServer (server, rerun = true) {
+    if (!SEARCH_PLATFORM_IDS.includes(server) || server === state.searchServer) return
+    cancelActiveSearch()
+    searchRequestId += 1
+    state.searchServer = server
+    try { localStorage.setItem(STORAGE.searchServer, server) } catch {}
+    state.searchResults = []
+    els.searchResults.innerHTML = ''
+    els.searchResultsWrap.hidden = true
+    syncSearchSourcePicker()
+    updateSearchPrompt()
+    if (rerun && els.query.value.trim()) runSearch()
+  }
+
+  function renderSearchState (query, results, completed, total, pending, server = state.searchServer) {
     state.searchResults = results
-    renderTrackRows(els.searchResults, results, '搜索：' + query)
+    const aggregate = server === 'aggregate'
+    renderTrackRows(els.searchResults, results, (aggregate ? '聚合搜索：' : sourceName(server) + '：') + query)
     els.searchCount.textContent = results.length + ' 首歌曲'
-    if (pending) {
+    if (!aggregate) {
+      els.searchSummary.textContent = results.length
+        ? `${sourceName(server)} · ${results.length} 首结果 · 已按相关度排序`
+        : `${sourceName(server)}没有找到结果，试试其他关键词或切换平台。`
+    } else if (pending) {
       els.searchSummary.textContent = `已聚合 ${completed}/${total} 个平台 · ${results.length} 首结果 · 正在继续补充并重排`
     } else {
       els.searchSummary.textContent = results.length
@@ -462,7 +528,9 @@
     if (results.length) els.searchLoading.hidden = true
     if (!pending && results.length === 0) {
       els.searchEmpty.querySelector('h2').textContent = '没有找到匹配歌曲'
-      els.searchEmpty.querySelector('p').textContent = '换个关键词，或者同时输入歌曲名和歌手名。'
+      els.searchEmpty.querySelector('p').textContent = aggregate
+        ? '换个关键词，或者同时输入歌曲名和歌手名。'
+        : '换个关键词，或者切换到聚合搜索和其他平台。'
     }
   }
 
@@ -477,15 +545,21 @@
     els.clearSearch.hidden = false
     showView('search')
     els.searchTitle.textContent = '“' + query + '”'
-    els.searchSummary.textContent = '正在聚合多个音乐平台，并按关键词相关度排序。'
+    const searchServer = state.searchServer
+    const aggregate = searchServer === 'aggregate'
+    els.searchEyebrow.textContent = aggregate ? '跨平台检索' : '单平台检索 · ' + sourceName(searchServer)
+    els.searchSummary.textContent = aggregate
+      ? '正在聚合多个音乐平台，并按关键词相关度排序。'
+      : '正在搜索 ' + sourceName(searchServer) + '。'
     els.searchEmpty.hidden = true
     els.searchResultsWrap.hidden = true
     els.searchLoading.hidden = false
     const requestId = ++searchRequestId
     try {
-      await progressiveSearch(query, (partial, completed, total, pending) => {
+      const search = aggregate ? progressiveSearch : (value, onUpdate) => platformSearch(value, searchServer, onUpdate)
+      await search(query, (partial, completed, total, pending) => {
         if (requestId !== searchRequestId) return
-        renderSearchState(query, partial, completed, total, pending)
+        renderSearchState(query, partial, completed, total, pending, searchServer)
       })
       if (requestId !== searchRequestId) return
     } catch (error) {
@@ -504,6 +578,22 @@
   els.searchForm.addEventListener('submit', (event) => {
     event.preventDefault()
     runSearch()
+  })
+  $$('[data-search-server]', els.searchSourcePicker).forEach((button) => {
+    button.addEventListener('click', () => selectSearchServer(button.dataset.searchServer))
+    button.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+      const buttons = $$('[data-search-server]', els.searchSourcePicker)
+      const current = buttons.indexOf(button)
+      const target = event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? buttons.length - 1
+          : (current + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length
+      event.preventDefault()
+      buttons[target].focus()
+      selectSearchServer(buttons[target].dataset.searchServer)
+    })
   })
   els.query.addEventListener('input', () => { els.clearSearch.hidden = !els.query.value })
   els.clearSearch.addEventListener('click', () => {
@@ -703,6 +793,7 @@
       if (host.includes('music.163.com') || host.endsWith('163cn.tv')) inferred.server = 'netease'
       else if (host.includes('y.qq.com')) inferred.server = 'tencent'
       else if (host.includes('kugou.com')) inferred.server = 'kugou'
+      else if (host.includes('music.douyin.com') || host.includes('qishui.com')) inferred.server = 'soda'
       else if (host.includes('kuwo.cn')) inferred.server = 'kuwo'
       else if (host.includes('music.baidu.com')) inferred.server = 'baidu'
       else if (host.includes('youtube.com') || host === 'youtu.be') inferred.server = 'ytmusic'
@@ -843,7 +934,7 @@
   }
 
   function sourceName (server) {
-    const labels = { aggregate: '聚合', netease: '网易云', tencent: 'QQ 音乐', ytmusic: 'YouTube Music', kugou: '酷狗', kuwo: '酷我', baidu: '百度', spotify: 'Spotify', apple: 'Apple Music' }
+    const labels = { aggregate: '聚合', netease: '网易云', tencent: 'QQ 音乐', ytmusic: 'YouTube Music', kugou: '酷狗', soda: '汽水音乐', kuwo: '酷我', baidu: '百度', spotify: 'Spotify', apple: 'Apple Music' }
     return labels[server] || server
   }
 
@@ -1611,7 +1702,14 @@
     const url = new URL(location.href)
     const type = url.searchParams.get('type')
     const id = url.searchParams.get('id')
-    const server = url.searchParams.get('server') || 'aggregate'
+    const requestedServer = url.searchParams.get('server')
+    const server = requestedServer || 'aggregate'
+    if (url.searchParams.get('q') && requestedServer && SEARCH_PLATFORM_IDS.includes(requestedServer)) {
+      state.searchServer = requestedServer
+      try { localStorage.setItem(STORAGE.searchServer, requestedServer) } catch {}
+    }
+    syncSearchSourcePicker()
+    updateSearchPrompt()
     if (type === 'playlist' && id) {
       const playlist = { server, id, name: url.searchParams.get('name') || ('歌单 ' + id) }
       loadPlaylist(playlist).catch((error) => toast(error.message, 'error'))

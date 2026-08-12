@@ -4,7 +4,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 - 首页、搜索、音乐库和歌单详情四类视图
 - 搜索结果或完整歌单作为连续播放队列
-- 自动聚合多个音乐平台，合并重复歌曲并按搜索词相关度排序
+- 默认自动聚合多个音乐平台，也可指定单个平台搜索
 - 队列、随机播放、列表/单曲循环、进度和音量控制
 - 标准 LRC + Enhanced LRC 逐字歌词
 - 喜欢的歌曲、最近播放和保存的在线歌单
@@ -39,12 +39,15 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 ```text
 /?q=Lemon
+/?q=Lemon&server=netease
 /?type=playlist&server=tencent&id=9505357778&name=My%20Playlist
 ```
 
-### 聚合搜索
+### 聚合与单平台搜索
 
-前端不再展示搜索音源选择。网页会通过同源 `/api/proxy` 渐进查询网易云、酷狗、Apple Music、YouTube Music、QQ 音乐、酷我和百度：首个健康平台返回后即可展示结果，其余平台完成时继续合并、去重并按相关度重排。Spotify 当前需要应用所有者保持 Premium，因此不加入网页默认 fan-out；仍可通过代理显式调用。
+搜索页默认选中“聚合”，网页会通过同源 `/api/proxy` 渐进查询网易云、酷狗、Apple Music、YouTube Music、QQ 音乐、酷我和百度：首个健康平台返回后即可展示结果，其余平台完成时继续合并、去重并按相关度重排。
+
+平台栏可切换为 QQ 音乐、网易云、酷狗、汽水音乐、YouTube Music、酷我、百度、Apple Music 或 Spotify。单平台模式只请求所选平台，切换平台会用当前关键词立即重新搜索，选项保存在浏览器本地。也支持 `/?q=关键词&server=soda` 这类 deep link。Spotify 当前需要应用所有者保持 Premium；汽水音乐需要服务端存在有效登录账号。
 
 `server=aggregate&type=search` 服务端聚合接口继续保留，会并行查询全部已配置平台；搜索冷启动预算为 3.5 秒，取得至少三个有效来源且结果足够时会提前结束并取消慢请求。两种路径都会过滤无效条目，合并标题和歌手完全相同的重复项，并综合标题、歌手、专辑、关键词覆盖率与平台原始排名计算相关度，最多返回 80 首。
 

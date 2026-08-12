@@ -98,7 +98,14 @@ assert.match(sourceCss, /\.home-now-card/)
 assert.doesNotMatch(sourceHtml, /id="server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
 assert.match(clientSource, /const SEARCH_SERVERS = \[/)
+assert.match(clientSource, /const SEARCH_PLATFORM_IDS = \[/)
 assert.match(clientSource, /async function progressiveSearch/)
+assert.match(clientSource, /async function platformSearch/)
+assert.match(clientSource, /rmusic_search_server_v1/)
+assert.match(sourceHtml, /role="radiogroup" aria-label="选择搜索平台"/)
+for (const server of ['aggregate', 'tencent', 'netease', 'kugou', 'soda', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']) {
+  assert.match(sourceHtml, new RegExp(`data-search-server="${server}"`), `search picker missing ${server}`)
+}
 const motionDeclarations = sourceCss.match(/\b(?:animation|transition)\s*:[^;]+;/g) || []
 for (const declaration of motionDeclarations) {
   assert.match(declaration, /var\(--curve-|cubic-bezier\(|:\s*none/, `motion must use a cubic-bezier curve: ${declaration}`)
