@@ -162,9 +162,24 @@
 
         <section class="view" id="view-search" data-view="search" hidden>
           <div class="page-heading">
-            <p class="eyebrow">跨平台检索</p>
+            <p class="eyebrow" id="search-eyebrow">跨平台检索</p>
             <h1 id="search-title">搜索音乐</h1>
             <p id="search-summary">搜索会自动聚合多个音乐平台，并按关键词相关度排序。</p>
+          </div>
+          <div class="search-source-area">
+            <span class="search-source-label">搜索范围</span>
+            <div class="search-source-scroll" id="search-source-picker" role="radiogroup" aria-label="选择搜索平台">
+              <button class="search-source active" type="button" role="radio" aria-checked="true" data-search-server="aggregate"><span class="source-dot"></span>聚合</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="tencent">QQ 音乐</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="netease">网易云</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="kugou">酷狗</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="soda">汽水</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="ytmusic">YouTube Music</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="kuwo">酷我</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="baidu">百度</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="apple">Apple Music</button>
+              <button class="search-source" type="button" role="radio" aria-checked="false" tabindex="-1" data-search-server="spotify" title="需要 Spotify API 可用">Spotify</button>
+            </div>
           </div>
           <div id="search-empty" class="empty-state">
             <span class="empty-icon"><svg class="icon"><use href="#i-search"></use></svg></span>
