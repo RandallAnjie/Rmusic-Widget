@@ -109,6 +109,9 @@ const env = {
         ], { total: 1 }))
       }
       if (url.pathname === '/api/v2/tracks') return searchResponse(url)
+      if (url.pathname === '/api/v2/tracks/netease') {
+        return Response.json(envelope([fixture], { requested: 1, total: 1, missing: [] }))
+      }
       if (url.pathname === '/api/v2/discovery') {
         if (headers.get('if-none-match') === '"discovery-etag"') {
           return new Response(null, { status: 304, headers: { etag: '"discovery-etag"' } })
@@ -125,12 +128,23 @@ const env = {
         const parts = url.pathname.split('/')
         const source = parts[4]
         const id = parts[5]
+        if (parts[6] === 'albums') {
+          return Response.json(envelope([{
+            id: 'album-1', source, type: 'album', name: 'Artist Album',
+            releaseDate: '2025-06-01T00:00:00.000Z', albumType: 'album',
+            artwork: { url: 'https://img.example/album.jpg' }, stats: { trackCount: 12 },
+            links: { self: `https://music.example/api/v2/albums/${source}/album-1` }
+          }], { total: 1 }))
+        }
         if (parts.length > 6) return Response.json(envelope([v2Track({ source })], { total: 1 }))
         return Response.json(envelope({
           id,
           source,
           name: 'Complete catalog resource',
-          links: { tracks: `https://music.example${url.pathname}/${url.pathname.includes('/artists/') ? 'top-tracks' : 'tracks'}` },
+          links: {
+            tracks: `https://music.example${url.pathname}/${url.pathname.includes('/artists/') ? 'top-tracks' : 'tracks'}`,
+            ...(url.pathname.includes('/artists/') ? { albums: `https://music.example${url.pathname}/albums` } : {})
+          },
           tracks: { items: [v2Track({ source })], total: 1, offset: 0, limit: 100, hasMore: false }
         }))
       }
@@ -199,6 +213,7 @@ assert.match(html, /id="mobile-now-cover"/)
 assert.match(html, /id="home-now-card"/)
 assert.match(html, /id="refreshCollection"/)
 assert.match(html, /id="collection-cache-status"/)
+assert.match(html, /id="artist-albums"/)
 assert.match(html, /id="discovery-recommendations"/)
 assert.match(html, /id="discovery-charts"/)
 assert.match(html, /id="discovery-new-releases"/)
@@ -226,6 +241,9 @@ assert.match(clientSource, /const API = '\/api\/proxy\/v2'/)
 assert.match(clientSource, /async function searchV2/)
 assert.match(clientSource, /async function fetchPlaylistV2/)
 assert.match(clientSource, /async function loadDiscovery/)
+assert.match(clientSource, /async function loadCatalog/)
+assert.match(clientSource, /mode: 'fast'/)
+assert.match(clientSource, /view: 'compact'/)
 assert.match(clientSource, /refresh: 'true'/)
 assert.match(clientSource, /function migrateLegacyResourceUrl/)
 assert.match(clientSource, /playlistCachePrefix: 'rmusic_playlist_cache_v1:'/)
@@ -320,6 +338,10 @@ const aggregateTracks = (await aggregateSearch.json()).data
 assert.equal(aggregateTracks[0].title, 'Night Drive')
 assert.equal(aggregateTracks[1].title, 'Night Drive (Live)')
 
+const batchTracks = await request('/api/proxy/v2/tracks/netease?ids=track-1')
+assert.equal(batchTracks.status, 200)
+assert.equal((await batchTracks.json()).data[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
+
 const discovery = await request('/api/proxy/v2/discovery?source=netease%2Ctencent&limit=8')
 assert.equal(discovery.status, 200)
 assert.equal(discovery.headers.get('etag'), '"discovery-etag"')
@@ -340,6 +362,14 @@ assert.equal(albumData.links.tracks, '/api/proxy/v2/albums/netease/album-1/track
 assert.equal(albumData.tracks.items[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
 const albumTracks = await request(albumData.links.tracks)
 assert.equal(albumTracks.status, 200)
+
+const artist = await request('/api/proxy/v2/artists/netease/artist-1')
+assert.equal(artist.status, 200)
+const artistData = (await artist.json()).data
+assert.equal(artistData.links.albums, '/api/proxy/v2/artists/netease/artist-1/albums')
+const artistAlbums = await request(artistData.links.albums)
+assert.equal(artistAlbums.status, 200)
+assert.equal((await artistAlbums.json()).data[0].links.self, '/api/proxy/v2/albums/netease/album-1')
 
 const streamOptions = await request('/api/proxy/v2/streams/netease/audio-1/options')
 assert.equal(streamOptions.status, 200)

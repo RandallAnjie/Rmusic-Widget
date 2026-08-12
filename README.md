@@ -6,6 +6,8 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 首页直接展示 V2 每日推荐、热门榜单和新歌速递
 - 搜索结果或完整歌单作为连续播放队列
 - 默认自动聚合多个音乐平台、去除同一录音的重复结果，也可指定单个平台搜索
+- 聚合搜索采用快速首屏，慢平台在后台补全；列表只传播放器所需的精简字段
+- 点击歌曲的歌手或专辑可继续浏览歌手发行目录、代表作和完整专辑
 - 队列、随机播放、列表/单曲循环、进度和音量控制
 - 标准 LRC + Enhanced LRC 逐字歌词
 - 喜欢的歌曲、最近播放，以及带完整本机快照的已保存歌单
@@ -42,8 +44,10 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | `GET /widget.js` | 浏览器缓存的应用控制器 |
 | `GET /api/v2/*` | 严格 token 鉴权的同源 Meting V2 API |
 | `GET /api/proxy/v2/tracks?query=…&source=all` | V2 聚合或单平台搜索 |
+| `GET /api/proxy/v2/tracks/{source}?ids={id1},{id2}` | V2 批量歌曲元数据，最多 50 首 |
 | `GET /api/proxy/v2/albums/{source}/{id}` | V2 完整专辑元数据及分页曲目 |
 | `GET /api/proxy/v2/artists/{source}/{id}` | V2 歌手元数据及代表曲目 |
+| `GET /api/proxy/v2/artists/{source}/{id}/albums` | V2 歌手发行目录 |
 | `GET /api/proxy/v2/playlists/{source}/{id}` | V2 歌单详情、创建人、介绍、封面和分页曲目 |
 | `GET /api/proxy/v2/discovery` | 推荐、榜单和新歌首页数据 |
 | `GET /api/proxy/v2/streams/{source}/{id}` | V2 音频流代理，支持 `quality` |
@@ -65,7 +69,9 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 平台栏可切换为 QQ 音乐、网易云、酷狗、汽水音乐、YouTube Music、酷我、百度、Apple Music 或 Spotify。单平台模式只请求所选平台，切换平台会用当前关键词立即重新搜索，选项保存在浏览器本地。也支持 `/?q=关键词&server=soda` 这类 deep link。导入歌单只需链接或 ID，名称、封面、介绍和创建人由 V2 自动解析。Spotify 当前需要应用所有者保持 Premium；汽水音乐需要服务端存在有效登录账号。
 
-聚合模式传 `source=all`，单平台模式传具体 `source`。相关度计算、平台状态和分页都以 V2 的 `meta` 为准，Widget 不再维护另一套聚合排序实现，最多请求 80 首。
+聚合模式传 `source=all&mode=fast&view=compact`，单平台模式传具体 `source` 和 `view=compact`。快速模式先显示首屏预算内完成的平台，若 `meta.complete=false`，页面会自动再次读取后台补全后的同一缓存；用户不需要重复搜索。相关度计算、ISRC 优先去重、平台状态和分页都以 V2 的 `meta` 为准，Widget 不再维护另一套聚合排序实现，最多请求 80 首。
+
+V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为目录入口。歌手页面继续读取 `/artists/{source}/{id}/albums` 展示发行目录，专辑卡片可进入完整曲目列表；这些请求和首页、歌单列表一样使用精简视图降低传输及解析开销。
 
 代理根据 V2 `meta.sources` 返回 `X-RMusic-Sources`，列出本次成功参与的音源。歌曲保留实际 `source`，播放、封面、歌词、收藏和最近播放继续使用对应平台资源。
 
@@ -73,7 +79,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 播放器可以选择 `auto`、`lossless`、`high`、`standard` 或 `low`，代理会把选择原样传给 Meting V2，并透传实际音质、编码和码率响应头。曲目卡片会根据 V2 `playback` 显示试听、会员、最高可用音质或暂不可播状态。QQ 音乐等平台因会员、cookie 或地域限制返回 `403/404` 时，代理直接保留该状态且使用 `Cache-Control: no-store`；不会搜索或播放其他平台版本。
 
-首页通过单个 `/api/proxy/v2/discovery` 请求获取推荐、榜单和新歌。结果会在浏览器缓存 10 分钟，服务端同时使用 D1 持久缓存；点击首页“刷新”会发送 `refresh=true` 主动重建服务端缓存。
+首页通过单个 `/api/proxy/v2/discovery?view=compact` 请求获取推荐、榜单和新歌。结果会在浏览器缓存 10 分钟，服务端先使用 isolate 热缓存再使用 D1 持久缓存；点击首页“刷新”会发送 `refresh=true` 主动重建服务端缓存。代理会透传 `Server-Timing`，便于区分各音乐平台的实际耗时。
 
 ## 环境变量与绑定
 
