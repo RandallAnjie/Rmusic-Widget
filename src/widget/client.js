@@ -35,6 +35,14 @@
     homeNowAction: $('home-now-action'),
     homeNowActionIcon: $('home-now-action-icon'),
     homeNowActionLabel: $('home-now-action-label'),
+    discoverySection: $('discovery-section'),
+    discoveryStatus: $('discovery-status'),
+    discoveryRecommendations: $('discovery-recommendations'),
+    discoveryCharts: $('discovery-charts'),
+    discoveryNewReleases: $('discovery-new-releases'),
+    refreshDiscovery: $('refreshDiscovery'),
+    playCharts: $('playCharts'),
+    playNewReleases: $('playNewReleases'),
     recentGrid: $('recent-grid'),
     favoritePreview: $('favorite-preview'),
     favoritePreviewSection: $('favorite-preview-section'),
@@ -96,6 +104,7 @@
     repeatBadge: $('repeatBadge'),
     currTime: $('curr-time'),
     duration: $('duration'),
+    quality: $('quality'),
     progressBar: $('progress-bar'),
     progressFill: $('progress-fill'),
     progressBuffered: $('progress-buffered'),
@@ -130,6 +139,8 @@
     modes: 'rmusic_playback_mode',
     volume: 'rmusic_volume_v2',
     searchServer: 'rmusic_search_server_v1',
+    quality: 'rmusic_quality_v1',
+    discovery: 'rmusic_discovery_v2',
     playlistCachePrefix: 'rmusic_playlist_cache_v1:'
   }
 
@@ -144,12 +155,17 @@
     currentTrack: null,
     favorites: normalizeList(readJson(STORAGE.favorites, [])),
     recent: normalizeList(readJson(STORAGE.recent, [])),
+    discovery: readDiscoverySnapshot(),
+    discoveryLoading: false,
     playlists: readJson(STORAGE.playlists, []),
     shuffle: 'off',
     repeat: 'off',
     openPanel: null,
     loadingAudio: false,
-    consecutiveErrors: 0
+    consecutiveErrors: 0,
+    quality: ['auto', 'lossless', 'high', 'standard', 'low'].includes(readStorage(STORAGE.quality))
+      ? readStorage(STORAGE.quality)
+      : 'auto'
   }
 
   let toastTimer = 0
@@ -194,13 +210,12 @@
     return [track.server || '', track.id || '', track.url || '', track.title || '', track.author || ''].join('|')
   }
 
-  function audioUrlWithHints (value, track) {
-    if (!value || track.server !== 'tencent') return value
+  function streamUrl (value) {
+    if (!value) return value
     try {
       const parsed = new URL(value, location.href)
       if (parsed.origin !== location.origin || !parsed.pathname.startsWith(API + '/streams/')) return value
-      if (!parsed.searchParams.get('title') && track.title) parsed.searchParams.set('title', track.title.slice(0, 160))
-      if (!parsed.searchParams.get('author') && track.author) parsed.searchParams.set('author', track.author.slice(0, 160))
+      parsed.searchParams.set('quality', state.quality)
       return parsed.pathname + '?' + parsed.searchParams.toString()
     } catch {
       return value
@@ -239,14 +254,28 @@
       '未知艺人'
     )
     out.album = text(track.album?.name || track.album, '')
-    out.url = audioUrlWithHints(migrateLegacyResourceUrl(text(track.links?.stream || track.url, ''), out.server), out)
+    out.url = migrateLegacyResourceUrl(text(track.links?.stream || track.url, ''), out.server)
     out.pic = migrateLegacyResourceUrl(text(track.artwork?.url || track.links?.artwork || track.pic, ''), out.server)
     out.lrc = migrateLegacyResourceUrl(text(track.links?.lyrics || track.lrc, ''), out.server)
     out.lrcpword = migrateLegacyResourceUrl(text(track.links?.wordLyrics || track.lrcpword, ''), out.server)
     out.duration_ms = typeof track.durationMs === 'number'
       ? track.durationMs
       : (typeof track.duration_ms === 'number' ? track.duration_ms : null)
+    out.playback = track.playback && typeof track.playback === 'object' ? track.playback : null
     return out
+  }
+
+  function readDiscoverySnapshot () {
+    const snapshot = readJson(STORAGE.discovery, null)
+    if (!snapshot || !Number.isFinite(snapshot.cachedAt)) {
+      return { recommendations: [], charts: [], newReleases: [], cachedAt: 0 }
+    }
+    return {
+      recommendations: normalizeList(snapshot.recommendations),
+      charts: normalizeList(snapshot.charts),
+      newReleases: normalizeList(snapshot.newReleases),
+      cachedAt: snapshot.cachedAt
+    }
   }
 
   function normalizeList (list, server) {
@@ -524,6 +553,19 @@
     syncFavoriteButtons()
   }
 
+  function playbackLabel (track) {
+    const playback = track?.playback
+    if (!playback) return ''
+    if (playback.available === false) return '暂不可播'
+    if (playback.previewOnly) return '试听'
+    const quality = Array.isArray(playback.qualities)
+      ? playback.qualities.find((item) => item?.available !== false)
+      : null
+    if (quality?.label) return quality.label
+    if (playback.requiresSubscription) return '会员'
+    return ''
+  }
+
   function createTrackRow (track, index, list, contextLabel) {
     const row = document.createElement('div')
     row.className = 'track-row'
@@ -559,7 +601,7 @@
 
     const album = document.createElement('span')
     album.className = 'track-album'
-    album.textContent = [track.album, sourceName(track.server)].filter(Boolean).join(' · ') || 'RMusic'
+    album.textContent = [track.album, sourceName(track.server), playbackLabel(track)].filter(Boolean).join(' · ') || 'RMusic'
 
     const like = document.createElement('button')
     like.type = 'button'
@@ -577,12 +619,12 @@
     return row
   }
 
-  function renderCards (container, tracks) {
+  function renderCards (container, tracks, contextLabel = '最近播放', emptyMessage = '播放一些歌曲后，这里会自动出现。') {
     container.innerHTML = ''
     if (!tracks.length) {
       const empty = document.createElement('div')
       empty.className = 'library-empty'
-      empty.textContent = '播放一些歌曲后，这里会自动出现。'
+      empty.textContent = emptyMessage
       container.appendChild(empty)
       return
     }
@@ -597,18 +639,89 @@
       button.className = 'card-play'
       button.setAttribute('aria-label', '播放 ' + track.title)
       button.innerHTML = '<svg class="icon"><use href="#i-play"></use></svg>'
-      button.addEventListener('click', (event) => { event.stopPropagation(); playFromList(tracks, index, '最近播放') })
+      button.addEventListener('click', (event) => { event.stopPropagation(); playFromList(tracks, index, contextLabel) })
       cover.appendChild(button)
+      const badge = document.createElement('span')
+      badge.className = 'card-badge'
+      badge.textContent = [sourceName(track.server), playbackLabel(track)].filter(Boolean).join(' · ')
+      cover.appendChild(badge)
       const title = document.createElement('strong')
       title.textContent = track.title
       const author = document.createElement('span')
       author.textContent = track.author
       card.append(cover, title, author)
-      card.addEventListener('click', () => playFromList(tracks, index, '最近播放'))
-      card.addEventListener('keydown', (event) => { if (event.key === 'Enter') playFromList(tracks, index, '最近播放') })
+      card.addEventListener('click', () => playFromList(tracks, index, contextLabel))
+      card.addEventListener('keydown', (event) => { if (event.key === 'Enter') playFromList(tracks, index, contextLabel) })
       container.appendChild(card)
     })
   }
+
+  function renderDiscovery () {
+    const discovery = state.discovery
+    const waiting = state.discoveryLoading ? '正在获取最新内容…' : '暂时没有可展示的内容。'
+    renderCards(els.discoveryRecommendations, discovery.recommendations, '为你推荐', waiting)
+    renderCards(els.discoveryCharts, discovery.charts, '热门榜单', waiting)
+    renderCards(els.discoveryNewReleases, discovery.newReleases, '新歌速递', waiting)
+    els.playCharts.disabled = discovery.charts.length === 0
+    els.playNewReleases.disabled = discovery.newReleases.length === 0
+    if (discovery.cachedAt) {
+      const updated = new Date(discovery.cachedAt).toLocaleString('zh-CN', {
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+      els.discoveryStatus.textContent = `目录推荐 · 更新于 ${updated}`
+    } else {
+      els.discoveryStatus.textContent = state.discoveryLoading ? '正在整理今日推荐…' : '推荐服务暂时不可用'
+    }
+  }
+
+  async function loadDiscovery (refresh = false) {
+    if (state.discoveryLoading) return
+    const hasFreshCache = state.discovery.cachedAt > Date.now() - 10 * 60 * 1000 &&
+      (state.discovery.recommendations.length || state.discovery.charts.length || state.discovery.newReleases.length)
+    if (!refresh && hasFreshCache) {
+      renderDiscovery()
+      return
+    }
+    state.discoveryLoading = true
+    els.refreshDiscovery.disabled = true
+    els.refreshDiscovery.classList.add('refreshing')
+    renderDiscovery()
+    try {
+      const payload = await fetchV2('/discovery', {
+        source: 'netease,tencent',
+        limit: '8',
+        ...(refresh ? { refresh: 'true' } : {})
+      })
+      const data = payload?.data || {}
+      state.discovery = {
+        recommendations: normalizeList(data.recommendations),
+        charts: normalizeList(data.charts),
+        newReleases: normalizeList(data.newReleases),
+        cachedAt: Date.now()
+      }
+      writeJson(STORAGE.discovery, {
+        ...state.discovery,
+        recommendations: state.discovery.recommendations.map(compactCachedTrack),
+        charts: state.discovery.charts.map(compactCachedTrack),
+        newReleases: state.discovery.newReleases.map(compactCachedTrack)
+      })
+    } catch (error) {
+      if (!state.discovery.cachedAt) els.discoveryStatus.textContent = error.message
+      if (refresh) toast('推荐刷新失败：' + error.message, 'error')
+    } finally {
+      state.discoveryLoading = false
+      els.refreshDiscovery.disabled = false
+      els.refreshDiscovery.classList.remove('refreshing')
+      renderDiscovery()
+    }
+  }
+
+  els.refreshDiscovery.addEventListener('click', () => loadDiscovery(true))
+  els.playCharts.addEventListener('click', () => playFromList(state.discovery.charts, 0, '热门榜单'))
+  els.playNewReleases.addEventListener('click', () => playFromList(state.discovery.newReleases, 0, '新歌速递'))
 
   /* ---------- Favorites, recent and library ---------- */
 
@@ -655,7 +768,8 @@
   }
 
   function renderHome () {
-    renderCards(els.recentGrid, state.recent)
+    renderDiscovery()
+    renderCards(els.recentGrid, state.recent, '最近播放')
     els.favoritePreviewSection.hidden = state.favorites.length === 0
     renderTrackRows(els.favoritePreview, state.favorites.slice(0, 5), '喜欢的歌曲')
   }
@@ -698,7 +812,8 @@
       pic: normalized.pic,
       lrc: normalized.lrc,
       lrcpword: normalized.lrcpword,
-      duration_ms: normalized.duration_ms
+      duration_ms: normalized.duration_ms,
+      playback: normalized.playback
     }
   }
 
@@ -952,7 +1067,7 @@
     return labels[server] || server
   }
 
-  async function fetchPlaylistV2 (playlist) {
+  async function fetchPlaylistV2 (playlist, refresh = false) {
     let source = playlist.server || 'aggregate'
     let offset = 0
     const limit = 100
@@ -960,7 +1075,11 @@
     let metadata = null
     for (let page = 0; page < 100; page += 1) {
       const path = '/playlists/' + encodeURIComponent(source) + '/' + encodeURIComponent(String(playlist.id))
-      const payload = await fetchV2(path, { offset: String(offset), limit: String(limit) })
+      const payload = await fetchV2(path, {
+        offset: String(offset),
+        limit: String(limit),
+        ...(refresh ? { refresh: 'true' } : {})
+      })
       const data = payload?.data
       if (!data || typeof data !== 'object') throw new Error('歌单返回格式异常')
       if (!metadata) {
@@ -1100,7 +1219,7 @@
     els.refreshCollection.classList.add('refreshing')
     els.refreshCollection.querySelector('span').textContent = '更新中…'
     try {
-      const result = await fetchPlaylistV2(previous)
+      const result = await fetchPlaylistV2(previous, true)
       if (requestId !== collectionRequestId) return
       const refreshed = applyPlaylistResult({ ...previous }, result)
       state.collection = refreshed
@@ -1134,7 +1253,6 @@
   function playQueueIndex (index) {
     const track = state.queue[index]
     if (!track) return
-    track.url = audioUrlWithHints(track.url, track)
     clearTimeout(pendingSkipTimer)
     state.queueIndex = index
     state.currentTrack = track
@@ -1159,7 +1277,7 @@
 
     // Keep audio.src + play() synchronous. iOS can suspend a
     // background tab in the await gap between tracks.
-    els.audio.src = track.url
+    els.audio.src = streamUrl(track.url)
     const promise = els.audio.play()
     if (promise && typeof promise.catch === 'function') promise.catch(() => setLoading(false))
 
@@ -1560,6 +1678,25 @@
     els.audio.volume = Number(els.volume.value)
     try { localStorage.setItem(STORAGE.volume, els.volume.value) } catch {}
   })
+  els.quality.value = state.quality
+  els.quality.addEventListener('change', () => {
+    state.quality = els.quality.value
+    try { localStorage.setItem(STORAGE.quality, state.quality) } catch {}
+    if (!state.currentTrack?.url) {
+      toast('播放音质已切换为' + els.quality.selectedOptions[0].textContent)
+      return
+    }
+    const resumeAt = Number.isFinite(els.audio.currentTime) ? els.audio.currentTime : 0
+    const shouldResume = !els.audio.paused
+    els.audio.src = streamUrl(state.currentTrack.url)
+    els.audio.addEventListener('loadedmetadata', () => {
+      if (resumeAt > 0 && Number.isFinite(els.audio.duration)) {
+        els.audio.currentTime = Math.min(resumeAt, Math.max(0, els.audio.duration - 0.25))
+      }
+      if (shouldResume) els.audio.play().catch(() => {})
+    }, { once: true })
+    toast('正在切换到' + els.quality.selectedOptions[0].textContent)
+  })
 
   /* ---------- Media Session ---------- */
 
@@ -1821,6 +1958,7 @@
     }
     syncSearchSourcePicker()
     updateSearchPrompt()
+    loadDiscovery().catch(() => {})
     if (type === 'playlist' && id) {
       const playlist = { server, id, name: url.searchParams.get('name') || ('歌单 ' + id) }
       loadPlaylist(playlist).catch((error) => toast(error.message, 'error'))

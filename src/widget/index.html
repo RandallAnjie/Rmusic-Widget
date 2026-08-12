@@ -132,6 +132,30 @@
             </article>
           </div>
 
+          <section class="content-section discovery-section" id="discovery-section">
+            <div class="section-heading">
+              <div><p class="eyebrow">每天都有新声音</p><h2>为你推荐</h2><p class="section-status" id="discovery-status">正在整理今日推荐…</p></div>
+              <button class="text-button discovery-refresh" id="refreshDiscovery" type="button"><svg class="icon"><use href="#i-refresh"></use></svg><span>刷新</span></button>
+            </div>
+            <div id="discovery-recommendations" class="card-grid discovery-grid"></div>
+          </section>
+
+          <section class="content-section discovery-section">
+            <div class="section-heading">
+              <div><p class="eyebrow">此刻流行</p><h2>热门榜单</h2></div>
+              <button class="text-button" id="playCharts" type="button">播放全部</button>
+            </div>
+            <div id="discovery-charts" class="card-grid discovery-grid"></div>
+          </section>
+
+          <section class="content-section discovery-section">
+            <div class="section-heading">
+              <div><p class="eyebrow">刚刚上架</p><h2>新歌速递</h2></div>
+              <button class="text-button" id="playNewReleases" type="button">播放全部</button>
+            </div>
+            <div id="discovery-new-releases" class="card-grid discovery-grid"></div>
+          </section>
+
           <section class="content-section" id="recent-section">
             <div class="section-heading">
               <div><p class="eyebrow">接着听</p><h2>最近播放</h2></div>
@@ -318,6 +342,16 @@
       </div>
 
       <div class="player-extras">
+        <label class="quality-control" title="播放音质">
+          <span>音质</span>
+          <select id="quality" aria-label="播放音质">
+            <option value="auto">自动</option>
+            <option value="lossless">无损</option>
+            <option value="high">高品质</option>
+            <option value="standard">标准</option>
+            <option value="low">省流</option>
+          </select>
+        </label>
         <button class="transport-button panel-trigger" type="button" data-panel="lyrics" title="歌词" aria-label="歌词"><svg class="icon"><use href="#i-mic"></use></svg></button>
         <button class="transport-button panel-trigger" type="button" data-panel="queue" title="队列" aria-label="播放队列"><svg class="icon"><use href="#i-queue"></use></svg></button>
         <svg class="icon volume-icon"><use href="#i-volume"></use></svg>

@@ -42,7 +42,7 @@ const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, HEAD, OPTIONS',
   'access-control-allow-headers': 'Content-Type, Authorization, X-Meting-Token, Range',
-  'access-control-expose-headers': 'Content-Range, WWW-Authenticate, X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RMusic-Api-Version, X-RMusic-Fallback, X-RMusic-Original-Server, X-RMusic-Sources',
+  'access-control-expose-headers': 'Content-Range, WWW-Authenticate, ETag, Age, X-Cache-Source, X-Meting-Quality, X-Meting-Codec, X-Meting-Bitrate-Kbps, X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RMusic-Api-Version, X-RMusic-Sources',
   'access-control-max-age': '86400'
 }
 

@@ -8,7 +8,6 @@
 const PUBLIC_ROOT = '/api/proxy/v2'
 const UPSTREAM_ROOT = '/api/v2'
 const PLAYLIST_DISCOVERY_SOURCES = ['netease', 'tencent', 'kugou', 'soda', 'baidu', 'kuwo', 'ytmusic', 'spotify', 'apple']
-const AUDIO_FALLBACK_SOURCES = ['netease', 'ytmusic']
 const DIRECT_REQUEST_HEADERS = [
   'accept',
   'authorization',
@@ -32,6 +31,10 @@ function upstreamInit (config, request, extra = {}) {
   headers.set('authorization', `Bearer ${config.musicApi.token}`)
   const range = request?.headers?.get('range')
   if (range) headers.set('range', range)
+  for (const name of ['if-none-match', 'if-modified-since']) {
+    const value = request?.headers?.get(name)
+    if (value) headers.set(name, value)
+  }
   return {
     method: 'GET',
     redirect: 'manual',
@@ -164,12 +167,6 @@ function publicResourceUrl (resource, source, id, query = {}) {
   return `${PUBLIC_ROOT}/${resource}/${encodePath(source)}/${encodePath(id)}${suffix ? `?${suffix}` : ''}`
 }
 
-function artistText (track) {
-  return Array.isArray(track?.artists)
-    ? track.artists.map((artist) => artist?.name || artist).filter(Boolean).join(' / ')
-    : ''
-}
-
 function rewriteApiLink (value) {
   if (typeof value !== 'string' || !value) return value
   try {
@@ -197,7 +194,6 @@ function rewriteTrack (track) {
   if (!track || typeof track !== 'object') return track
   const source = track.source
   const id = track.id
-  const author = artistText(track)
   const stream = resourceIdentity(track?.links?.stream, 'streams', source, id)
   const artwork = resourceIdentity(track?.links?.artwork, 'artworks', source, id)
   const lyrics = resourceIdentity(track?.links?.lyrics, 'lyrics', source, id)
@@ -212,9 +208,7 @@ function rewriteTrack (track) {
     links: {
       ...track.links,
       self: publicResourceUrl('tracks', source, id),
-      stream: publicResourceUrl('streams', stream.source, stream.id, source === 'tencent'
-        ? { title: track.title, author }
-        : {}),
+      stream: publicResourceUrl('streams', stream.source, stream.id),
       artwork: publicResourceUrl('artworks', artwork.source, artwork.id),
       lyrics: publicResourceUrl('lyrics', lyrics.source, lyrics.id),
       wordLyrics: publicResourceUrl('lyrics', lyrics.source, lyrics.id, { granularity: 'word' })
@@ -222,28 +216,20 @@ function rewriteTrack (track) {
   }
 }
 
+function rewriteData (value) {
+  if (Array.isArray(value)) return value.map(rewriteData)
+  if (!value || typeof value !== 'object') return value
+  if (value.source && value.id && value.links?.stream) return rewriteTrack(value)
+  const output = Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, rewriteData(item)])
+  )
+  if (value.links) output.links = rewriteLinks(value.links)
+  return output
+}
+
 function rewritePayload (payload) {
   if (!payload || typeof payload !== 'object') return payload
-  let data = payload.data
-  if (Array.isArray(payload.data)) {
-    data = payload.data.map((item) => item?.links?.stream
-      ? rewriteTrack(item)
-      : (item?.links ? { ...item, links: rewriteLinks(item.links) } : item))
-  } else if (payload.data?.tracks?.items) {
-    data = {
-      ...payload.data,
-      links: rewriteLinks(payload.data.links),
-      tracks: {
-        ...payload.data.tracks,
-        items: payload.data.tracks.items.map(rewriteTrack)
-      }
-    }
-  } else if (payload.data?.source && payload.data?.id && payload.data?.links?.stream) {
-    data = rewriteTrack(payload.data)
-  } else if (payload.data?.links) {
-    data = { ...payload.data, links: rewriteLinks(payload.data.links) }
-  }
-  return { ...payload, data, links: rewriteLinks(payload.links) }
+  return { ...payload, data: rewriteData(payload.data), links: rewriteLinks(payload.links) }
 }
 
 function sourceHeader (payload) {
@@ -277,6 +263,7 @@ async function metadataResponse (upstream) {
     'cache-control': upstream.headers.get('cache-control') || 'public, max-age=45',
     'x-rmusic-api-version': '2'
   })
+  for (const name of ['etag', 'age', 'x-cache-source']) copyHeader(upstream.headers, headers, name)
   const sources = sourceHeader(rewritten)
   if (sources) headers.set('x-rmusic-sources', sources)
   return new Response(JSON.stringify(rewritten), { status: upstream.status, headers })
@@ -287,20 +274,19 @@ function copyHeader (source, target, name) {
   if (value) target.set(name, value)
 }
 
-function mediaResponse (upstream, kind, fallback = null) {
+function mediaResponse (upstream, kind) {
   if (kind === 'stream') {
     const headers = new Headers()
-    for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+    for (const name of [
+      'content-type', 'content-length', 'content-range', 'accept-ranges',
+      'x-meting-quality', 'x-meting-quality-requested', 'x-meting-codec', 'x-meting-bitrate-kbps'
+    ]) {
       copyHeader(upstream.headers, headers, name)
     }
     if (!headers.has('accept-ranges')) headers.set('accept-ranges', 'bytes')
     if (!headers.has('content-type')) headers.set('content-type', 'audio/mpeg')
     headers.set('cache-control', upstream.ok ? 'public, max-age=300' : 'no-store')
     headers.set('x-rmusic-api-version', '2')
-    if (fallback) {
-      headers.set('x-rmusic-fallback', fallback.source)
-      headers.set('x-rmusic-original-server', fallback.originalSource)
-    }
     return new Response(upstream.body, { status: upstream.status, headers })
   }
   if (kind === 'lyrics') {
@@ -317,118 +303,20 @@ function mediaResponse (upstream, kind, fallback = null) {
   return new Response(response.body, { status: response.status, headers })
 }
 
-function normaliseText (value) {
-  return String(value || '')
-    .normalize('NFKC')
-    .toLocaleLowerCase('zh-CN')
-    .replace(/[^\p{L}\p{N}]+/gu, '')
-}
-
-function editDistance (left, right, limit = 2) {
-  const a = Array.from(left)
-  const b = Array.from(right)
-  if (Math.abs(a.length - b.length) > limit) return limit + 1
-  let previous = b.map((_, index) => index + 1)
-  previous.unshift(0)
-  for (let row = 1; row <= a.length; row++) {
-    const current = [row]
-    let rowMinimum = row
-    for (let column = 1; column <= b.length; column++) {
-      const value = Math.min(
-        current[column - 1] + 1,
-        previous[column] + 1,
-        previous[column - 1] + (a[row - 1] === b[column - 1] ? 0 : 1)
-      )
-      current.push(value)
-      rowMinimum = Math.min(rowMinimum, value)
-    }
-    if (rowMinimum > limit) return limit + 1
-    previous = current
-  }
-  return previous[b.length]
-}
-
-function authorMatchScore (candidate, wanted) {
-  if (!wanted) return 0
-  if (candidate === wanted) return 6
-  if (candidate && editDistance(candidate, wanted, 2) <= 2) return 4
-  if (
-    candidate &&
-    Math.abs(candidate.length - wanted.length) <= 2 &&
-    (candidate.includes(wanted) || wanted.includes(candidate))
-  ) return 3
-  return -4
-}
-
-function fallbackScore (track, title, author) {
-  const wantedTitle = normaliseText(title)
-  const wantedAuthor = normaliseText(author)
-  const candidateTitle = normaliseText(track?.title)
-  const candidateAuthor = normaliseText(artistText(track))
-  if (!wantedTitle || !candidateTitle) return -Infinity
-  let score = candidateTitle === wantedTitle
-    ? 8
-    : (candidateTitle.includes(wantedTitle) || wantedTitle.includes(candidateTitle) ? 3 : -Infinity)
-  if (score === -Infinity) return score
-  score += authorMatchScore(candidateAuthor, wantedAuthor)
-  return score
-}
-
-async function resolveAudioFallback (request, config, title, author) {
-  const query = [title, author].filter(Boolean).join(' ').trim()
-  if (!query) return null
-  for (const source of AUDIO_FALLBACK_SOURCES) {
-    try {
-      const params = new URLSearchParams({ query, source, limit: '10' })
-      const search = await callUpstreamV2(config, request, '/tracks', params)
-      if (!search.ok) continue
-      const payload = await search.json()
-      const ranked = (payload?.data || [])
-        .map((track) => ({ track, score: fallbackScore(track, title, author) }))
-        .sort((left, right) => right.score - left.score)
-      const match = ranked[0]
-      if (!match || match.score < 8 || !match.track?.id) continue
-      const stream = resourceIdentity(
-        match.track?.links?.stream,
-        'streams',
-        match.track.source || source,
-        match.track.id
-      )
-      const audio = await callUpstreamV2(
-        config,
-        request,
-        `/streams/${encodePath(stream.source)}/${encodePath(stream.id)}`,
-        new URLSearchParams(),
-        { accept: '*/*' }
-      )
-      if (audio.ok) return { upstream: audio, source: stream.source }
-    } catch {}
-  }
-  return null
-}
-
 async function proxyStream (request, config, source, id, searchParams) {
-  let upstream = await callUpstreamV2(
+  const params = new URLSearchParams()
+  for (const name of ['quality', 'br']) {
+    const value = searchParams.get(name)
+    if (value) params.set(name, value)
+  }
+  const upstream = await callUpstreamV2(
     config,
     request,
     `/streams/${encodePath(source)}/${encodePath(id)}`,
-    new URLSearchParams(),
+    params,
     { accept: '*/*' }
   )
-  let fallback = null
-  if (source === 'tencent' && (upstream.status === 403 || upstream.status === 404)) {
-    const recovered = await resolveAudioFallback(
-      request,
-      config,
-      searchParams.get('title') || '',
-      searchParams.get('author') || ''
-    )
-    if (recovered) {
-      upstream = recovered.upstream
-      fallback = { source: recovered.source, originalSource: source }
-    }
-  }
-  return mediaResponse(upstream, 'stream', fallback)
+  return mediaResponse(upstream, 'stream')
 }
 
 async function discoverPlaylist (request, config, id, searchParams) {
@@ -489,11 +377,12 @@ export async function proxyApiV2 (request, config) {
     return metadataResponse(await callUpstreamV2(config, request, path, url.searchParams))
   }
   if (resource === 'albums' || resource === 'artists') {
-    if (parts.length !== 3) return notFound(url.pathname)
+    const child = resource === 'albums' ? 'tracks' : 'top-tracks'
+    if (parts.length !== 3 && !(parts.length === 4 && parts[3] === child)) return notFound(url.pathname)
     return metadataResponse(await callUpstreamV2(
       config,
       request,
-      `/${resource}/${encodePath(parts[1])}/${encodePath(parts[2])}`,
+      `/${resource}/${encodePath(parts[1])}/${encodePath(parts[2])}${parts.length === 4 ? `/${child}` : ''}`,
       url.searchParams
     ))
   }
@@ -508,8 +397,19 @@ export async function proxyApiV2 (request, config) {
       url.searchParams
     ))
   }
+  if (resource === 'streams' && parts.length === 4 && parts[3] === 'options') {
+    return metadataResponse(await callUpstreamV2(
+      config,
+      request,
+      `/streams/${encodePath(parts[1])}/${encodePath(parts[2])}/options`,
+      url.searchParams
+    ))
+  }
   if (resource === 'streams' && parts.length === 3) {
     return proxyStream(request, config, parts[1], parts[2], url.searchParams)
+  }
+  if (['charts', 'new-releases', 'recommendations', 'discovery'].includes(resource) && parts.length === 1) {
+    return metadataResponse(await callUpstreamV2(config, request, `/${resource}`, url.searchParams))
   }
   if (resource === 'artworks' && parts.length === 3) {
     const upstream = await callUpstreamV2(
