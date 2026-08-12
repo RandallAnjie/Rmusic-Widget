@@ -118,7 +118,6 @@
     closePlaylistModal: $('closePlaylistModal'),
     playlistForm: $('playlist-form'),
     playlistId: $('playlist-id'),
-    playlistName: $('playlist-name'),
     playlistSave: $('playlist-save'),
     playlistFormError: $('playlist-form-error'),
     loadPlaylistButton: $('loadPlaylistButton')
@@ -807,7 +806,7 @@
     const playlist = {
       server: parsed.server,
       id: parsed.id,
-      name: els.playlistName.value.trim() || '歌单 ' + parsed.id
+      name: '歌单 ' + parsed.id
     }
     if (!playlist.id) return
     els.loadPlaylistButton.disabled = true
