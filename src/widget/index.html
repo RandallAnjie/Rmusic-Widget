@@ -23,6 +23,7 @@
     <symbol id="i-next" viewBox="0 0 24 24"><path d="M18 5v14M6 6l9 6-9 6Z"/></symbol>
     <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M3 7h3c5 0 7 10 12 10h3M18 4l3 3-3 3M3 17h3c2 0 3-1 4-3M15 7c1-1 2-1 3-1h3M18 14l3 3-3 3"/></symbol>
     <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 8a7 7 0 0 1 11.7-1.7L20 12M4 12l2.2 5.7A7 7 0 0 0 17.9 16"/></symbol>
     <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4Z"/><path d="M15 9a5 5 0 0 1 0 6M18 6a9 9 0 0 1 0 12"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M5 5l14 14M19 5 5 19"/></symbol>
@@ -225,12 +226,13 @@
               <p class="eyebrow" id="collection-kind">歌单</p>
               <h1 id="collection-title">歌单</h1>
               <p id="collection-description"></p>
-              <div class="collection-byline"><span class="mini-brand">R</span><strong>RMusic</strong><span>·</span><span id="collection-count"></span></div>
+              <div class="collection-byline"><span class="mini-brand">R</span><strong>RMusic</strong><span>·</span><span id="collection-count"></span><span id="collection-cache-status" hidden></span></div>
             </div>
           </div>
           <div class="collection-toolbar">
             <button class="primary-button round-play" id="playCollection" type="button" aria-label="播放歌单"><svg class="icon"><use href="#i-play"></use></svg></button>
             <button class="icon-button like-collection" id="saveCollection" type="button" title="保存歌单" aria-label="保存歌单"><svg class="icon"><use href="#i-heart"></use></svg></button>
+            <button class="secondary-button collection-refresh" id="refreshCollection" type="button" title="从音乐平台获取最新歌单并覆盖本地缓存" hidden><svg class="icon"><use href="#i-refresh"></use></svg><span>更新歌单</span></button>
           </div>
           <div id="collection-loading" class="skeleton-list" hidden></div>
           <div id="collection-tracks" class="track-table"></div>
@@ -337,7 +339,7 @@
         <label><span>歌单链接或 ID</span><input id="playlist-id" required placeholder="粘贴分享链接，或输入 3778678" autocomplete="off" /></label>
         <label><span>显示名称 <small>可选</small></span><input id="playlist-name" placeholder="我的歌单" autocomplete="off" /></label>
         <label class="check-row"><input id="playlist-save" type="checkbox" checked /><span>保存到本机音乐库</span></label>
-        <p class="form-note">RMusic 会从分享链接识别平台；仅输入 ID 时自动尝试可用平台。曲目每次打开时实时获取。</p>
+        <p class="form-note">RMusic 会从分享链接识别平台；保存后会把完整歌单缓存到本机，之后可在歌单页手动更新。</p>
         <div id="playlist-form-error" class="form-error" hidden></div>
         <button class="primary-button full-button" id="loadPlaylistButton" type="submit">载入歌单</button>
       </form>
