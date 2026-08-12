@@ -40,7 +40,7 @@ RATE_MAX=180
 
 ```text
 /?q=Lemon
-/?type=playlist&server=tencent&id=9505357778&name=Test
+/?type=playlist&server=tencent&id=9505357778
 ```
 
 ## 常见问题
