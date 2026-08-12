@@ -258,6 +258,10 @@
             <button class="icon-button like-collection" id="saveCollection" type="button" title="保存歌单" aria-label="保存歌单"><svg class="icon"><use href="#i-heart"></use></svg></button>
             <button class="secondary-button collection-refresh" id="refreshCollection" type="button" title="从音乐平台获取最新歌单并覆盖本地缓存" hidden><svg class="icon"><use href="#i-refresh"></use></svg><span>更新歌单</span></button>
           </div>
+          <section class="artist-albums" id="artist-albums-section" hidden>
+            <div class="section-heading small"><h2>发行作品</h2><span class="muted" id="artist-albums-count"></span></div>
+            <div class="album-strip" id="artist-albums"></div>
+          </section>
           <div id="collection-loading" class="skeleton-list" hidden></div>
           <div id="collection-tracks" class="track-table"></div>
         </section>

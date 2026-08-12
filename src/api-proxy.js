@@ -263,7 +263,7 @@ async function metadataResponse (upstream) {
     'cache-control': upstream.headers.get('cache-control') || 'public, max-age=45',
     'x-rmusic-api-version': '2'
   })
-  for (const name of ['etag', 'age', 'x-cache-source']) copyHeader(upstream.headers, headers, name)
+  for (const name of ['etag', 'age', 'x-cache-source', 'server-timing']) copyHeader(upstream.headers, headers, name)
   const sources = sourceHeader(rewritten)
   if (sources) headers.set('x-rmusic-sources', sources)
   return new Response(JSON.stringify(rewritten), { status: upstream.status, headers })
@@ -371,18 +371,19 @@ export async function proxyApiV2 (request, config) {
     ))
   }
   if (resource === 'tracks') {
+    if (![1, 2, 3].includes(parts.length)) return notFound(url.pathname)
     const path = parts.length === 3
       ? `/tracks/${encodePath(parts[1])}/${encodePath(parts[2])}`
-      : '/tracks'
+      : (parts.length === 2 ? `/tracks/${encodePath(parts[1])}` : '/tracks')
     return metadataResponse(await callUpstreamV2(config, request, path, url.searchParams))
   }
   if (resource === 'albums' || resource === 'artists') {
-    const child = resource === 'albums' ? 'tracks' : 'top-tracks'
-    if (parts.length !== 3 && !(parts.length === 4 && parts[3] === child)) return notFound(url.pathname)
+    const children = resource === 'albums' ? ['tracks'] : ['top-tracks', 'albums']
+    if (parts.length !== 3 && !(parts.length === 4 && children.includes(parts[3]))) return notFound(url.pathname)
     return metadataResponse(await callUpstreamV2(
       config,
       request,
-      `/${resource}/${encodePath(parts[1])}/${encodePath(parts[2])}${parts.length === 4 ? `/${child}` : ''}`,
+      `/${resource}/${encodePath(parts[1])}/${encodePath(parts[2])}${parts.length === 4 ? `/${parts[3]}` : ''}`,
       url.searchParams
     ))
   }

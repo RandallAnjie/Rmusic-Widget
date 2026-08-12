@@ -74,6 +74,9 @@
     playCollection: $('playCollection'),
     saveCollection: $('saveCollection'),
     refreshCollection: $('refreshCollection'),
+    artistAlbumsSection: $('artist-albums-section'),
+    artistAlbums: $('artist-albums'),
+    artistAlbumsCount: $('artist-albums-count'),
     contextPanel: $('context-panel'),
     closePanel: $('closePanel'),
     mobileNowBackdrop: $('mobile-now-backdrop'),
@@ -247,12 +250,23 @@
     const out = { ...track }
     out.server = track.source || track.server || server || 'netease'
     out.title = text(track.title, '未知歌曲')
+    out.artistItems = Array.isArray(track.artists)
+      ? track.artists.map((artist) => typeof artist === 'string'
+        ? { id: null, name: artist }
+        : { id: artist?.id == null ? null : String(artist.id), name: text(artist?.name) }).filter((artist) => artist.name)
+      : []
     out.author = text(
-      Array.isArray(track.artists)
-        ? track.artists.map((artist) => artist?.name || artist).filter(Boolean).join(' / ')
+      out.artistItems.length
+        ? out.artistItems.map((artist) => artist.name).join(' / ')
         : track.author,
       '未知艺人'
     )
+    out.albumResource = track.album && typeof track.album === 'object'
+      ? {
+          id: track.album.id == null ? null : String(track.album.id),
+          name: text(track.album.name)
+        }
+      : { id: null, name: text(track.album) }
     out.album = text(track.album?.name || track.album, '')
     out.url = migrateLegacyResourceUrl(text(track.links?.stream || track.url, ''), out.server)
     out.pic = migrateLegacyResourceUrl(text(track.artwork?.url || track.links?.artwork || track.pic, ''), out.server)
@@ -366,7 +380,9 @@
       const payload = await fetchV2('/tracks', {
         query,
         source: server === 'aggregate' ? 'all' : server,
-        limit: '80'
+        limit: '80',
+        view: 'compact',
+        ...(server === 'aggregate' ? { mode: 'fast' } : {})
       }, controller.signal)
       return {
         tracks: normalizeList(payload?.data, server),
@@ -454,7 +470,7 @@
         : `${sourceName(server)}没有找到结果，试试其他关键词或切换平台。`
     } else {
       els.searchSummary.textContent = results.length
-        ? `聚合完成 · ${completed || total} 个平台已响应 · ${results.length} 首结果 · 已按相关度排序`
+        ? `${meta.complete === false ? '先显示快速结果，其他平台后台补全' : '聚合完成'} · ${completed || total} 个平台已响应 · ${results.length} 首结果 · 已按相关度排序`
         : '没有找到结果，试试更短或更具体的关键词。'
     }
     els.searchResultsWrap.hidden = results.length === 0
@@ -493,6 +509,16 @@
       const result = await searchV2(query, searchServer)
       if (requestId !== searchRequestId) return
       renderSearchState(query, result.tracks, result.meta, searchServer)
+      if (aggregate && result.meta?.complete === false) {
+        setTimeout(async () => {
+          if (requestId !== searchRequestId || state.searchServer !== searchServer || els.query.value.trim() !== query) return
+          try {
+            const enriched = await searchV2(query, searchServer)
+            if (requestId !== searchRequestId) return
+            renderSearchState(query, enriched.tracks, enriched.meta, searchServer)
+          } catch {}
+        }, 1800)
+      }
     } catch (error) {
       if (requestId !== searchRequestId) return
       state.searchResults = []
@@ -592,16 +618,35 @@
     const title = document.createElement('span')
     title.className = 'track-title'
     title.textContent = track.title
-    const author = document.createElement('span')
+    const primaryArtist = track.artistItems?.find((item) => item.id)
+    const author = document.createElement(primaryArtist ? 'button' : 'span')
     author.className = 'track-author'
     author.textContent = track.author
+    if (primaryArtist) {
+      author.type = 'button'
+      author.classList.add('catalog-link')
+      author.title = '查看 ' + primaryArtist.name
+      author.addEventListener('click', (event) => {
+        event.stopPropagation()
+        loadCatalog('artists', track.server, primaryArtist.id).catch((error) => toast(error.message, 'error'))
+      })
+    }
     copy.append(title, author)
     main.appendChild(copy)
     main.addEventListener('dblclick', () => playFromList(list, index, contextLabel))
 
-    const album = document.createElement('span')
+    const albumTarget = track.albumResource?.id
+    const album = document.createElement(albumTarget ? 'button' : 'span')
     album.className = 'track-album'
     album.textContent = [track.album, sourceName(track.server), playbackLabel(track)].filter(Boolean).join(' · ') || 'RMusic'
+    if (albumTarget) {
+      album.type = 'button'
+      album.classList.add('catalog-link')
+      album.title = '查看专辑 ' + track.album
+      album.addEventListener('click', () => {
+        loadCatalog('albums', track.server, albumTarget).catch((error) => toast(error.message, 'error'))
+      })
+    }
 
     const like = document.createElement('button')
     like.type = 'button'
@@ -693,6 +738,7 @@
       const payload = await fetchV2('/discovery', {
         source: 'netease,tencent',
         limit: '8',
+        view: 'compact',
         ...(refresh ? { refresh: 'true' } : {})
       })
       const data = payload?.data || {}
@@ -807,7 +853,8 @@
       server: normalized.server,
       title: normalized.title,
       author: normalized.author,
-      album: normalized.album,
+      artists: normalized.artistItems,
+      album: normalized.albumResource?.id ? normalized.albumResource : normalized.album,
       url: normalized.url,
       pic: normalized.pic,
       lrc: normalized.lrc,
@@ -1067,6 +1114,122 @@
     return labels[server] || server
   }
 
+  async function loadCatalog (resource, source, id) {
+    if (!['albums', 'artists'].includes(resource) || !source || !id) return false
+    const requestId = ++collectionRequestId
+    const collection = {
+      id: String(id),
+      server: source,
+      resourceType: resource === 'albums' ? 'album' : 'artist',
+      name: resource === 'albums' ? '正在载入专辑' : '正在载入歌手',
+      tracks: []
+    }
+    state.collection = collection
+    showView('collection')
+    renderCollectionHeader()
+    els.collectionLoading.hidden = false
+    els.collectionTracks.innerHTML = ''
+    try {
+      let offset = 0
+      const limit = resource === 'albums' ? 100 : 50
+      let metadata = null
+      const tracks = []
+      for (let page = 0; page < 100; page += 1) {
+        const payload = await fetchV2(
+          '/' + resource + '/' + encodeURIComponent(source) + '/' + encodeURIComponent(String(id)),
+          { offset: String(offset), limit: String(limit), view: 'compact' }
+        )
+        const data = payload?.data
+        if (!data || typeof data !== 'object') throw new Error('目录返回格式异常')
+        metadata ||= data
+        const pageTracks = normalizeList(data.tracks?.items, source)
+        tracks.push(...pageTracks)
+        if (!data.tracks?.hasMore || !pageTracks.length) break
+        offset += pageTracks.length
+      }
+      if (requestId !== collectionRequestId) return false
+      collection.name = metadata?.name || collection.name
+      collection.cover = metadata?.artwork?.url || metadata?.artwork?.originalUrl || ''
+      collection.description = metadata?.description || ''
+      collection.artists = metadata?.artists || []
+      collection.genres = metadata?.genres || []
+      collection.label = metadata?.label || ''
+      collection.releaseDate = metadata?.releaseDate || ''
+      collection.stats = metadata?.stats || { trackCount: tracks.length }
+      collection.sourceUrl = metadata?.links?.source || null
+      collection.tracks = tracks
+      if (resource === 'artists' && metadata?.links?.albums) {
+        try {
+          const albumPayload = await fetchV2(
+            '/artists/' + encodeURIComponent(source) + '/' + encodeURIComponent(String(id)) + '/albums',
+            { offset: '0', limit: '20' }
+          )
+          collection.albums = Array.isArray(albumPayload?.data) ? albumPayload.data : []
+          collection.albumCount = Number(albumPayload?.meta?.total || collection.albums.length)
+        } catch {
+          collection.albums = []
+        }
+      }
+      renderCollectionHeader()
+      renderTrackRows(els.collectionTracks, tracks, collection.name)
+      if (!tracks.length) toast('目录没有返回曲目', 'error')
+      return collection
+    } catch (error) {
+      if (requestId !== collectionRequestId) return false
+      const empty = document.createElement('div')
+      empty.className = 'library-empty'
+      empty.textContent = error.message
+      els.collectionTracks.appendChild(empty)
+      throw error
+    } finally {
+      if (requestId === collectionRequestId) els.collectionLoading.hidden = true
+    }
+  }
+
+  function renderArtistAlbums () {
+    const collection = state.collection
+    const albums = collection?.resourceType === 'artist' && Array.isArray(collection.albums)
+      ? collection.albums
+      : []
+    els.artistAlbumsSection.hidden = albums.length === 0
+    els.artistAlbums.innerHTML = ''
+    els.artistAlbumsCount.textContent = albums.length
+      ? `${collection.albumCount || albums.length} 张专辑/单曲`
+      : ''
+    albums.forEach((album, index) => {
+      const card = document.createElement('button')
+      card.type = 'button'
+      card.className = 'album-card'
+      card.style.setProperty('--item-index', String(Math.min(index, 12)))
+      const cover = document.createElement('span')
+      cover.className = 'album-card-cover'
+      cover.textContent = initials(album.name)
+      const artwork = album.artwork?.url || album.artwork?.originalUrl
+      if (artwork) {
+        const image = document.createElement('img')
+        image.loading = 'lazy'
+        image.decoding = 'async'
+        image.src = artwork
+        image.alt = ''
+        image.addEventListener('error', () => image.remove())
+        cover.appendChild(image)
+      }
+      const name = document.createElement('strong')
+      name.textContent = album.name || '未命名专辑'
+      const detail = document.createElement('span')
+      detail.textContent = [
+        album.releaseDate ? String(album.releaseDate).slice(0, 4) : '',
+        album.albumType,
+        album.stats?.trackCount ? album.stats.trackCount + ' 首' : ''
+      ].filter(Boolean).join(' · ')
+      card.append(cover, name, detail)
+      card.addEventListener('click', () => {
+        loadCatalog('albums', collection.server, album.id).catch((error) => toast(error.message, 'error'))
+      })
+      els.artistAlbums.appendChild(card)
+    })
+  }
+
   async function fetchPlaylistV2 (playlist, refresh = false) {
     let source = playlist.server || 'aggregate'
     let offset = 0
@@ -1078,6 +1241,7 @@
       const payload = await fetchV2(path, {
         offset: String(offset),
         limit: String(limit),
+        view: 'compact',
         ...(refresh ? { refresh: 'true' } : {})
       })
       const data = payload?.data
@@ -1095,6 +1259,7 @@
   }
 
   function applyPlaylistResult (collection, result) {
+    collection.resourceType = 'playlist'
     collection.tracks = result.tracks
     collection.server = result.metadata.source || collection.server
     collection.name = result.metadata.name || collection.name
@@ -1119,7 +1284,7 @@
       return cached
     }
 
-    const collection = { ...(savedDefinition || playlist), tracks: [] }
+    const collection = { ...(savedDefinition || playlist), resourceType: 'playlist', tracks: [] }
     state.collection = collection
     showView('collection')
     renderCollectionHeader()
@@ -1149,10 +1314,18 @@
   function renderCollectionHeader () {
     const collection = state.collection
     if (!collection) return
-    els.collectionKind.textContent = sourceName(collection.server) + ' 歌单'
-    els.collectionTitle.textContent = collection.name || ('歌单 ' + collection.id)
+    const resourceLabel = collection.resourceType === 'album'
+      ? '专辑'
+      : (collection.resourceType === 'artist' ? '歌手' : '歌单')
+    els.collectionKind.textContent = sourceName(collection.server) + ' ' + resourceLabel
+    els.collectionTitle.textContent = collection.name || (resourceLabel + ' ' + collection.id)
     const creator = collection.creator?.name ? '创建人：' + collection.creator.name : ''
-    els.collectionDescription.textContent = collection.description || creator || ('来自 ' + sourceName(collection.server) + ' · 在线获取最新曲目')
+    const catalogDetails = [
+      collection.releaseDate ? String(collection.releaseDate).slice(0, 10) : '',
+      collection.label,
+      ...(Array.isArray(collection.genres) ? collection.genres.slice(0, 2) : [])
+    ].filter(Boolean).join(' · ')
+    els.collectionDescription.textContent = collection.description || creator || catalogDetails || ('来自 ' + sourceName(collection.server) + ' · 在线获取最新曲目')
     const total = collection.stats?.trackCount || collection.tracks.length
     els.collectionCount.textContent = total ? total + ' 首歌曲' : '正在载入曲目'
     if (collection.cachedAt) {
@@ -1180,11 +1353,16 @@
     } else {
       els.collectionCover.textContent = initials(collection.name)
     }
+    renderArtistAlbums()
     syncCollectionSaveButton()
   }
 
   function syncCollectionSaveButton () {
     const collection = state.collection
+    const isPlaylist = !collection?.resourceType || collection.resourceType === 'playlist'
+    els.saveCollection.hidden = !isPlaylist
+    els.refreshCollection.hidden = !isPlaylist
+    if (!isPlaylist) return
     const saved = !!collection && state.playlists.some((item) => playlistKey(item) === playlistKey(collection))
     els.saveCollection.classList.toggle('saved', saved)
     els.saveCollection.title = saved ? '从音乐库移除' : '保存到音乐库'
