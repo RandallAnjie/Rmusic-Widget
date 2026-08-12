@@ -4,19 +4,73 @@ import { brotliDecompressSync } from 'node:zlib'
 import worker from '../dist/_worker.js'
 
 const calls = []
-const fixture = [{
-  id: 'track-1',
-  title: 'Night Drive',
-  author: 'RMusic',
-  album: 'City Lights',
-  duration_ms: 213000,
-  url: 'https://music.example/api?server=netease&type=url&id=audio-1&auth=old',
-  pic: '/api?server=netease&type=pic&id=cover-1&auth=old',
-  lrc: 'https://music.example/api?server=netease&type=lrc&id=lyric-1',
-  lrcpword: 'https://music.example/api?server=netease&type=lrcpword&id=word-1&auth=old'
-}]
-const traditionalFixture = [{ ...fixture[0], title: '晴天', author: '周杰倫' }]
-const pollutedFixture = [{ ...fixture[0], title: 'Unsafe', author: 'Artist / DJ Foo' }]
+
+function v2Track (overrides = {}) {
+  const source = overrides.source || 'netease'
+  const id = overrides.id || 'track-1'
+  const title = overrides.title || 'Night Drive'
+  const artist = overrides.artist || 'RMusic'
+  return {
+    id,
+    source,
+    title,
+    artists: [{ id: null, name: artist }],
+    album: { id: null, name: 'City Lights' },
+    durationMs: 213000,
+    artwork: {
+      url: `https://music.example/api/v2/artworks/${source}/cover-1`,
+      originalUrl: 'https://img.example/raw.jpg'
+    },
+    links: {
+      self: `https://music.example/api/v2/tracks/${source}/${id}`,
+      stream: `https://music.example/api/v2/streams/${source}/${overrides.audioId || 'audio-1'}?auth=old`,
+      artwork: `https://music.example/api/v2/artworks/${source}/cover-1?auth=old`,
+      lyrics: `https://music.example/api/v2/lyrics/${source}/lyric-1`,
+      wordLyrics: `https://music.example/api/v2/lyrics/${source}/lyric-1?granularity=word&auth=old`
+    },
+    relevance: overrides.relevance || 1000
+  }
+}
+
+const fixture = v2Track()
+const traditionalFixture = v2Track({ title: '晴天', artist: '周杰倫' })
+const pollutedFixture = v2Track({ title: 'Unsafe', artist: 'Artist / DJ Foo' })
+
+function envelope (data, meta = {}) {
+  return { data, meta: { apiVersion: '2', ...meta } }
+}
+
+function searchResponse (url) {
+  const query = url.searchParams.get('query')
+  const source = url.searchParams.get('source') || 'all'
+  if (query === 'Night Drive') {
+    if (source === 'all') {
+      return Response.json(envelope([
+        fixture,
+        v2Track({ source: 'tencent', id: 'live-1', audioId: 'live-audio', title: 'Night Drive (Live)', relevance: 800 })
+      ], {
+        query,
+        source: 'all',
+        sources: [
+          { source: 'netease', status: 'fulfilled', count: 1 },
+          { source: 'tencent', status: 'fulfilled', count: 1 },
+          { source: 'spotify', status: 'rejected', count: 0, httpStatus: 503 }
+        ]
+      }))
+    }
+    return Response.json(envelope([{ ...fixture, source, links: v2Track({ source }).links }], {
+      query,
+      source: [source],
+      sources: [{ source, status: 'fulfilled', count: 1 }]
+    }))
+  }
+  if (query === '晴天 周杰伦') return Response.json(envelope([traditionalFixture]))
+  if (query === 'Unsafe Artist') return Response.json(envelope([pollutedFixture]))
+  return Response.json(envelope([fixture], {
+    query,
+    sources: [{ source: source === 'all' ? 'netease' : source, status: 'fulfilled', count: 1 }]
+  }))
+}
 
 const env = {
   MUSIC_API_TOKEN: 'server-only-secret',
@@ -25,39 +79,42 @@ const env = {
     async fetch (input, init) {
       const url = new URL(input)
       calls.push({ url, init })
-      const type = url.searchParams.get('type')
-      const server = url.searchParams.get('server')
-      if (['search', 'playlist'].includes(type)) {
-        if (type === 'search' && url.searchParams.get('id') === 'Slow Search') {
-          if (server === 'netease') return Response.json(fixture)
-          return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => resolve(Response.json([])), 10000)
-            init.signal?.addEventListener('abort', () => {
-              clearTimeout(timer)
-              reject(new DOMException('aborted', 'AbortError'))
-            }, { once: true })
-          })
-        }
-        if (type === 'search' && url.searchParams.get('id') === 'Night Drive') {
-          if (server === 'netease') return Response.json(fixture)
-          if (server === 'tencent') return Response.json([{ ...fixture[0], title: 'Night Drive (Live)', url: 'https://music.example/api?server=tencent&type=url&id=live-1' }])
-          if (server === 'kugou') return Response.json([{ ...fixture[0], title: 'Drive', author: 'Night', url: 'https://music.example/api?server=kugou&type=url&id=loose-1' }])
-          if (server === 'spotify') return Response.json({ error: true }, { status: 403 })
-          return Response.json([])
-        }
-        if (url.searchParams.get('id') === '晴天 周杰伦') return Response.json(traditionalFixture)
-        if (url.searchParams.get('id') === 'Unsafe Artist') return Response.json(pollutedFixture)
-        return Response.json(fixture)
+      assert.match(url.pathname, /^\/api\/v2(?:\/|$)/)
+      assert.equal(new Headers(init.headers).get('authorization'), 'Bearer server-only-secret')
+      assert.equal(url.searchParams.has('token'), false)
+
+      if (url.pathname === '/api/v2/sources') {
+        return Response.json(envelope([
+          { id: 'netease', capabilities: ['search', 'playlist'], links: { self: 'https://music.example/api/v2/sources/netease' } }
+        ], { total: 1 }))
       }
-      if (type === 'pic') {
+      if (url.pathname === '/api/v2/tracks') return searchResponse(url)
+      if (url.pathname.startsWith('/api/v2/playlists/')) {
+        const parts = url.pathname.split('/')
+        const source = parts[4]
+        if (source === 'aggregate') return Response.json({ status: 400 }, { status: 400 })
+        return Response.json(envelope({
+          id: parts[5],
+          source,
+          name: 'Midnight Drive Collection',
+          cover: 'https://img.example/playlist.jpg',
+          description: 'A city-pop playlist from the V2 resource.',
+          creator: { id: 'creator-1', name: 'Randall', avatar: null, role: 'owner' },
+          stats: { trackCount: 1, playCount: 42, followerCount: 3 },
+          tracks: { items: [{ ...fixture, source, links: v2Track({ source }).links }], total: 1, offset: 0, limit: 100, hasMore: false }
+        }))
+      }
+      if (url.pathname.startsWith('/api/v2/artworks/')) {
         return new Response(null, { status: 302, headers: { location: 'https://img.example/cover.jpg' } })
       }
-      if (type === 'url') {
-        if (server === 'tencent') {
-          return Response.json({ error: true, status: 403, message: 'vkey empty' }, { status: 403 })
+      if (url.pathname.startsWith('/api/v2/streams/')) {
+        const source = url.pathname.split('/')[4]
+        if (source === 'tencent') {
+          return Response.json({ status: 403, detail: 'vkey empty', apiVersion: '2' }, { status: 403 })
         }
+        const range = new Headers(init.headers).get('range')
         return new Response('audio', {
-          status: init.headers.range ? 206 : 200,
+          status: range ? 206 : 200,
           headers: {
             'content-type': 'audio/mpeg',
             'content-range': 'bytes 0-4/5',
@@ -65,7 +122,13 @@ const env = {
           }
         })
       }
-      return new Response('[00:00.00]Night Drive', { headers: { 'content-type': 'text/plain' } })
+      if (url.pathname.startsWith('/api/v2/lyrics/')) {
+        return new Response('[00:00.00]Night Drive', { headers: { 'content-type': 'text/plain' } })
+      }
+      if (url.pathname === '/api/v2' || url.pathname === '/api/v2/') {
+        return Response.json(envelope({ name: 'Meting REST API', version: '2' }))
+      }
+      return Response.json({ status: 404, detail: 'not found' }, { status: 404 })
     }
   }
 }
@@ -85,6 +148,7 @@ assert.doesNotMatch(html, /server-only-secret/)
 const sourceHtml = fs.readFileSync(new URL('../src/widget/index.html', import.meta.url), 'utf8')
 const clientSource = fs.readFileSync(new URL('../src/widget/client.js', import.meta.url), 'utf8')
 const sourceCss = fs.readFileSync(new URL('../src/widget/index.css', import.meta.url), 'utf8')
+const proxySource = fs.readFileSync(new URL('../src/api-proxy.js', import.meta.url), 'utf8')
 const htmlIds = [...sourceHtml.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1])
 assert.equal(new Set(htmlIds).size, htmlIds.length, 'HTML must not contain duplicate IDs')
 const referencedIds = [...clientSource.matchAll(/(?<!\$)\$\('([^']+)'\)/g)].map((match) => match[1])
@@ -97,11 +161,12 @@ assert.match(sourceCss, /\.mobile-now-stage/)
 assert.match(sourceCss, /\.home-now-card/)
 assert.doesNotMatch(sourceHtml, /id="server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
-assert.match(clientSource, /const SEARCH_SERVERS = \[/)
-assert.match(clientSource, /const SEARCH_PLATFORM_IDS = \[/)
-assert.match(clientSource, /async function progressiveSearch/)
-assert.match(clientSource, /async function platformSearch/)
-assert.match(clientSource, /rmusic_search_server_v1/)
+assert.match(clientSource, /const API = '\/api\/proxy\/v2'/)
+assert.match(clientSource, /async function searchV2/)
+assert.match(clientSource, /async function fetchPlaylistV2/)
+assert.match(clientSource, /function migrateLegacyResourceUrl/)
+assert.doesNotMatch(clientSource, /progressiveSearch|platformSearch|type=search|server=/)
+assert.doesNotMatch(proxySource, /\/api\?server=|type=url|type=search/)
 assert.match(sourceHtml, /role="radiogroup" aria-label="选择搜索平台"/)
 for (const server of ['aggregate', 'tencent', 'netease', 'kugou', 'soda', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']) {
   assert.match(sourceHtml, new RegExp(`data-search-server="${server}"`), `search picker missing ${server}`)
@@ -132,88 +197,81 @@ const js = await request('/widget.js')
 assert.match(js.headers.get('content-type'), /javascript/)
 assert.match(await js.text(), /rmusic_favorites_v2/)
 
-const search = await request('/api/proxy?server=netease&type=search&id=night')
+const search = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=netease')
 assert.equal(search.status, 200)
-const [track] = await search.json()
-assert.equal(track.album, 'City Lights')
-assert.equal(track.duration_ms, 213000)
-assert.equal(track.server, 'netease')
-assert.equal(track.url, '/api/proxy?server=netease&type=url&id=audio-1')
-assert.equal(track.pic, '/api/proxy?server=netease&type=pic&id=cover-1')
-assert.equal(track.lrc, '/api/proxy?server=netease&type=lrc&id=lyric-1')
-assert.equal(track.lrcpword, '/api/proxy?server=netease&type=lrcpword&id=word-1')
-assert.equal(calls.at(-1).url.searchParams.get('token'), 'server-only-secret')
+assert.equal(search.headers.get('x-rmusic-api-version'), '2')
+const searchEnvelope = await search.json()
+const [track] = searchEnvelope.data
+assert.equal(track.album.name, 'City Lights')
+assert.equal(track.durationMs, 213000)
+assert.equal(track.source, 'netease')
+assert.equal(track.links.stream, '/api/proxy/v2/streams/netease/audio-1')
+assert.equal(track.links.artwork, '/api/proxy/v2/artworks/netease/cover-1')
+assert.equal(track.links.lyrics, '/api/proxy/v2/lyrics/netease/lyric-1')
+assert.equal(track.links.wordLyrics, '/api/proxy/v2/lyrics/netease/lyric-1?granularity=word')
 
-const tencentSearch = await request('/api/proxy?server=tencent&type=search&id=night')
-const [tencentTrack] = await tencentSearch.json()
-assert.equal(tencentTrack.url, '/api/proxy?server=tencent&type=url&id=audio-1&title=Night+Drive&author=RMusic')
+const sources = await request('/api/proxy/v2/sources')
+assert.equal(sources.status, 200)
+const [source] = (await sources.json()).data
+assert.equal(source.id, 'netease')
+assert.deepEqual(source.capabilities, ['search', 'playlist'])
+assert.equal(source.links.self, '/api/proxy/v2/sources/netease')
+assert.equal(source.links.stream, undefined)
 
-const aggregateCallStart = calls.length
-const aggregateSearch = await request('/api/proxy?type=search&id=Night%20Drive')
+const tencentSearch = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=tencent')
+const [tencentTrack] = (await tencentSearch.json()).data
+assert.equal(tencentTrack.links.stream, '/api/proxy/v2/streams/tencent/audio-1?title=Night+Drive&author=RMusic')
+
+const aggregateSearch = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=all&limit=80')
 assert.equal(aggregateSearch.status, 200)
-assert.match(aggregateSearch.headers.get('x-rmusic-sources'), /tencent/)
-assert.match(aggregateSearch.headers.get('x-rmusic-sources'), /netease/)
-assert.doesNotMatch(aggregateSearch.headers.get('x-rmusic-sources'), /spotify/)
-const aggregateTracks = await aggregateSearch.json()
+assert.equal(aggregateSearch.headers.get('x-rmusic-sources'), 'netease,tencent')
+const aggregateTracks = (await aggregateSearch.json()).data
 assert.equal(aggregateTracks[0].title, 'Night Drive')
-assert.equal(aggregateTracks[0].server, 'netease')
 assert.equal(aggregateTracks[1].title, 'Night Drive (Live)')
-const aggregateCalls = calls.slice(aggregateCallStart)
-assert.ok(aggregateCalls.length >= 8)
-assert.ok(aggregateCalls.every(({ url }) => url.searchParams.get('token') === 'server-only-secret'))
 
-const slowSearchStarted = Date.now()
-const budgetedSearch = await request('/api/proxy?type=search&id=Slow%20Search')
-const slowSearchElapsed = Date.now() - slowSearchStarted
-assert.equal(budgetedSearch.status, 200)
-assert.ok(slowSearchElapsed < 4800, `aggregate search exceeded latency budget: ${slowSearchElapsed} ms`)
-assert.equal((await budgetedSearch.json())[0].server, 'netease')
+const playlist = await request('/api/proxy/v2/playlists/netease/3778678?offset=0&limit=100')
+assert.equal(playlist.status, 200)
+const playlistData = (await playlist.json()).data
+assert.equal(playlistData.name, 'Midnight Drive Collection')
+assert.equal(playlistData.creator.name, 'Randall')
+assert.match(playlistData.description, /V2 resource/)
+assert.equal(playlistData.cover, 'https://img.example/playlist.jpg')
+assert.equal(playlistData.tracks.items[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
 
-const aggregatePlaylist = await request('/api/proxy?server=aggregate&type=playlist&id=3778678')
-assert.equal(aggregatePlaylist.status, 200)
-assert.equal(aggregatePlaylist.headers.get('x-rmusic-sources'), 'netease')
-assert.equal((await aggregatePlaylist.json())[0].server, 'netease')
-
-const lyrics = await request(track.lrcpword)
+const lyrics = await request(track.links.wordLyrics)
 assert.equal(lyrics.status, 200)
 assert.match(await lyrics.text(), /Night Drive/)
-assert.equal(calls.at(-1).url.searchParams.get('type'), 'lrcpword')
-assert.equal(calls.at(-1).url.searchParams.get('token'), 'server-only-secret')
+assert.equal(calls.at(-1).url.searchParams.get('granularity'), 'word')
 
-const audio = await request(track.url, { headers: { range: 'bytes=0-4' } })
+const audio = await request(track.links.stream, { headers: { range: 'bytes=0-4' } })
 assert.equal(audio.status, 206)
 assert.equal(audio.headers.get('accept-ranges'), 'bytes')
-assert.equal(calls.at(-1).init.headers.range, 'bytes=0-4')
+assert.equal(new Headers(calls.at(-1).init.headers).get('range'), 'bytes=0-4')
 
 const recoveryCallStart = calls.length
-const recovered = await request('/api/proxy?server=tencent&type=url&id=blocked&title=Night+Drive&author=RMusic', { headers: { range: 'bytes=0-4' } })
+const recovered = await request('/api/proxy/v2/streams/tencent/blocked?title=Night+Drive&author=RMusic', { headers: { range: 'bytes=0-4' } })
 assert.equal(recovered.status, 206)
 assert.equal(recovered.headers.get('x-rmusic-fallback'), 'netease')
 assert.equal(recovered.headers.get('x-rmusic-original-server'), 'tencent')
 assert.match(recovered.headers.get('access-control-expose-headers'), /X-RMusic-Fallback/i)
 assert.equal(await recovered.text(), 'audio')
-const recoveryCalls = calls.slice(recoveryCallStart).map(({ url }) => [
-  url.searchParams.get('server'),
-  url.searchParams.get('type'),
-  url.searchParams.get('id')
+const recoveryPaths = calls.slice(recoveryCallStart).map(({ url }) => url.pathname)
+assert.deepEqual(recoveryPaths, [
+  '/api/v2/streams/tencent/blocked',
+  '/api/v2/tracks',
+  '/api/v2/streams/netease/audio-1'
 ])
-assert.deepEqual(recoveryCalls, [
-  ['tencent', 'url', 'blocked'],
-  ['netease', 'search', 'Night Drive RMusic'],
-  ['netease', 'url', 'audio-1']
-])
-assert.ok(calls.slice(recoveryCallStart).every(({ url }) => url.searchParams.get('token') === 'server-only-secret'))
 
-const traditionalRecovery = await request('/api/proxy?server=tencent&type=url&id=blocked&title=%E6%99%B4%E5%A4%A9&author=%E5%91%A8%E6%9D%B0%E4%BC%A6')
+const traditionalRecovery = await request('/api/proxy/v2/streams/tencent/blocked?title=%E6%99%B4%E5%A4%A9&author=%E5%91%A8%E6%9D%B0%E4%BC%A6')
 assert.equal(traditionalRecovery.status, 200)
 assert.equal(traditionalRecovery.headers.get('x-rmusic-fallback'), 'netease')
 
-const pollutedRecovery = await request('/api/proxy?server=tencent&type=url&id=blocked&title=Unsafe&author=Artist')
+const pollutedRecovery = await request('/api/proxy/v2/streams/tencent/blocked?title=Unsafe&author=Artist')
 assert.equal(pollutedRecovery.status, 403)
 assert.equal(pollutedRecovery.headers.get('x-rmusic-fallback'), null)
 
-const unrecoverable = await request('/api/proxy?server=tencent&type=url&id=blocked-without-metadata')
+const unrecoverable = await request('/api/proxy/v2/streams/tencent/blocked-without-metadata')
 assert.equal(unrecoverable.status, 403)
 assert.equal(unrecoverable.headers.get('cache-control'), 'no-store')
 
-console.log('smoke: app shell, metadata rewrite, lyrics, audio proxy and Tencent fallback passed')
+console.log('smoke: V2 REST search, playlist metadata, lyrics, media proxy and fallback passed')
