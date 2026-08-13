@@ -244,19 +244,7 @@ function sourceHeader (payload) {
   return ''
 }
 
-async function metadataResponse (upstream) {
-  if (!upstream.ok) return passThrough(upstream)
-  const raw = await upstream.text()
-  let payload
-  try {
-    payload = JSON.parse(raw)
-  } catch {
-    const headers = new Headers(upstream.headers)
-    headers.delete('content-encoding')
-    headers.delete('content-length')
-    headers.delete('transfer-encoding')
-    return new Response(raw, { status: upstream.status, headers })
-  }
+function metadataPayloadResponse (upstream, payload) {
   const rewritten = rewritePayload(payload)
   const headers = new Headers({
     'content-type': 'application/json; charset=utf-8',
@@ -267,6 +255,20 @@ async function metadataResponse (upstream) {
   const sources = sourceHeader(rewritten)
   if (sources) headers.set('x-rmusic-sources', sources)
   return new Response(JSON.stringify(rewritten), { status: upstream.status, headers })
+}
+
+async function metadataResponse (upstream) {
+  if (!upstream.ok) return passThrough(upstream)
+  const raw = await upstream.text()
+  try {
+    return metadataPayloadResponse(upstream, JSON.parse(raw))
+  } catch {
+    const headers = new Headers(upstream.headers)
+    headers.delete('content-encoding')
+    headers.delete('content-length')
+    headers.delete('transfer-encoding')
+    return new Response(raw, { status: upstream.status, headers })
+  }
 }
 
 function copyHeader (source, target, name) {
@@ -387,7 +389,21 @@ async function discoverPlaylist (request, config, id, searchParams) {
         searchParams
       )
       if (!upstream.ok) continue
-      return metadataResponse(upstream)
+      const payload = await upstream.json()
+      const data = payload?.data
+      const items = Array.isArray(data?.tracks?.items) ? data.tracks.items.length : 0
+      const total = Math.max(
+        Number(data?.tracks?.total || 0),
+        Number(data?.stats?.trackCount || 0),
+        items
+      )
+      // Numeric IDs can exist on several providers. Some upstreams return a
+      // placeholder 200 response for an unknown ID, so accepting the first
+      // successful status can silently select the wrong platform. A detected
+      // playlist must contain at least one real track; share links already
+      // carry an explicit source and do not use this discovery route.
+      if (!data?.source || !data?.id || total <= 0) continue
+      return metadataPayloadResponse(upstream, payload)
     } catch {}
   }
   return Response.json({

@@ -67,7 +67,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 搜索页默认选中“聚合”，通过 `/api/proxy/v2/tracks?query=…&source=all` 让 Meting V2 并发查询平台、容忍单源失败，按相关度统一排序并去除同一录音的重复结果。去重不会生成备用音源，也不会在播放失败时切换平台。
 
-平台栏可切换为 QQ 音乐、网易云、酷狗、汽水音乐、YouTube Music、酷我、百度、Apple Music 或 Spotify。单平台模式只请求所选平台，切换平台会用当前关键词立即重新搜索，选项保存在浏览器本地。也支持 `/?q=关键词&server=soda` 这类 deep link。导入歌单只需链接或 ID，名称、封面、介绍和创建人由 V2 自动解析。Spotify 当前需要应用所有者保持 Premium；汽水音乐需要服务端存在有效登录账号。
+平台栏可切换为 QQ 音乐、网易云、酷狗、汽水音乐、YouTube Music、酷我、百度、Apple Music 或 Spotify。单平台模式只请求所选平台，切换平台会用当前关键词立即重新搜索，选项保存在浏览器本地。也支持 `/?q=关键词&server=soda` 这类 deep link。导入歌单只需链接或 ID，无需选择平台：分享链接按域名识别，纯 ID 由 V2 自动探测来源；名称、封面、介绍、创建人和完整曲目会直接保存到浏览器本地。Spotify 当前需要应用所有者保持 Premium；汽水音乐需要服务端存在有效登录账号。
 
 聚合模式传 `source=all&mode=fast&view=compact`，单平台模式传具体 `source` 和 `view=compact`。快速模式先显示首屏预算内完成的平台，若 `meta.complete=false`，页面会自动再次读取后台补全后的同一缓存；用户不需要重复搜索。相关度计算、ISRC 优先去重、平台状态和分页都以 V2 的 `meta` 为准，Widget 不再维护另一套聚合排序实现，最多请求 80 首。
 

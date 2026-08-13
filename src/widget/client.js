@@ -130,7 +130,6 @@
     closePlaylistModal: $('closePlaylistModal'),
     playlistForm: $('playlist-form'),
     playlistId: $('playlist-id'),
-    playlistSave: $('playlist-save'),
     playlistFormError: $('playlist-form-error'),
     loadPlaylistButton: $('loadPlaylistButton')
   }
@@ -972,13 +971,12 @@
     }
     if (!playlist.id) return
     els.loadPlaylistButton.disabled = true
-    els.loadPlaylistButton.textContent = '载入中…'
+    els.loadPlaylistButton.textContent = '识别并保存中…'
     els.playlistFormError.hidden = true
     try {
-      const shouldSave = els.playlistSave.checked
       closePlaylistModal()
       const loaded = await loadPlaylist(playlist)
-      if (loaded && shouldSave) {
+      if (loaded) {
         const stored = savePlaylistDefinition(loaded)
         if (!stored.saved) throw new Error('浏览器存储空间不足，无法保存歌单')
         renderLibrary()
@@ -987,14 +985,13 @@
         toast(stored.cached ? '歌单和完整曲目已缓存到本机' : '歌单已保存，但本机空间不足，曲目缓存失败', stored.cached ? undefined : 'error')
       }
       els.playlistForm.reset()
-      els.playlistSave.checked = true
     } catch (error) {
       els.playlistModal.hidden = false
       els.playlistFormError.textContent = error.message
       els.playlistFormError.hidden = false
     } finally {
       els.loadPlaylistButton.disabled = false
-      els.loadPlaylistButton.textContent = '载入歌单'
+      els.loadPlaylistButton.textContent = '识别并保存'
     }
   })
 
