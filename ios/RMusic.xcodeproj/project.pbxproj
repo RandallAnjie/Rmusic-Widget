@@ -30,6 +30,7 @@
 		69246648BA16E427B5BDC798 /* BrandMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E6048B809D37BBE0719DB0 /* BrandMark.swift */; };
 		6BAE004FAD397672B0549CAE /* CredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C88C2ED25F5339BDCFE34E5E /* CredentialStoreTests.swift */; };
 		6F94B2CF5E485B9FC2DDCDAE /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36AAC00A20E1715699982078 /* LibraryView.swift */; };
+		7A7251EBACE95855A9FF52ED /* PlaybackControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35936F37B96C2650795F9B5B /* PlaybackControllerTests.swift */; };
 		7A91B0724072433F8530601C /* QueuePanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE3D2A06088AD15567A7F242 /* QueuePanelView.swift */; };
 		83DBAA26537DD0231390F1D2 /* CatalogDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A334C426ADA0712C7585C54 /* CatalogDetailView.swift */; };
 		883C9255E3A7232F1562E655 /* AccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B74A9C1C708783FBAAB35576 /* AccountStore.swift */; };
@@ -93,6 +94,7 @@
 		20E652A76AC5844F8420AED9 /* DeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepLink.swift; sourceTree = "<group>"; };
 		22BD313149CC0239F0FAD319 /* TrackRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackRow.swift; sourceTree = "<group>"; };
 		2F2A36D44D7BAED10B7AC8F7 /* LoadingAndEmptyViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingAndEmptyViews.swift; sourceTree = "<group>"; };
+		35936F37B96C2650795F9B5B /* PlaybackControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackControllerTests.swift; sourceTree = "<group>"; };
 		36AAC00A20E1715699982078 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		4009951C31DF3D6EBD3BA093 /* PlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackController.swift; sourceTree = "<group>"; };
 		4816FFE3E0C62A0768349D35 /* SectionHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SectionHeader.swift; sourceTree = "<group>"; };
@@ -323,6 +325,7 @@
 			children = (
 				12D4968CC38BC79B6D1D1179 /* LRCParserTests.swift */,
 				FB1566A07D4C4E062FBAE3BE /* NowPlayingSnapshotTests.swift */,
+				35936F37B96C2650795F9B5B /* PlaybackControllerTests.swift */,
 			);
 			path = Playback;
 			sourceTree = "<group>";
@@ -489,6 +492,7 @@
 				0D273EDE7586DE18DEFC4C2E /* DeepLinkTests.swift in Sources */,
 				F38AAEB93F21B146E2988F60 /* LRCParserTests.swift in Sources */,
 				8CF4386CCDBAC1040CD25AAA /* NowPlayingSnapshotTests.swift in Sources */,
+				7A7251EBACE95855A9FF52ED /* PlaybackControllerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -656,7 +660,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Config/RMusic.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "Config/RMusic-Debug.entitlements";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = "Config/RMusic-Info.plist";

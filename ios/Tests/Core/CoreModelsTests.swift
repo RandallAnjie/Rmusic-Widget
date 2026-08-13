@@ -82,4 +82,28 @@ final class CoreModelsTests: XCTestCase {
         XCTAssertEqual(canonicalTencent.catalogID(for: .tencent), "000aHmbL2aPXWH")
         XCTAssertEqual(numericNetease.catalogID(for: .netease), "6452")
     }
+
+    func testSearchEnvelopeAcceptsNullPaginationLinks() throws {
+        let data = Data(#"""
+        {
+          "data":[{"id":"1","source":"apple","title":"Lemon"}],
+          "meta":{
+            "apiVersion":"2","complete":true,"total":1,
+            "sources":[{"source":"apple","status":"fulfilled","count":1}]
+          },
+          "links":{
+            "self":"/api/proxy/v2/tracks?query=Lemon",
+            "next":null,
+            "previous":null
+          }
+        }
+        """#.utf8)
+
+        let envelope = try JSONDecoder().decode(APIEnvelope<[Track]>.self, from: data)
+
+        XCTAssertEqual(envelope.data.first?.title, "Lemon")
+        XCTAssertEqual(envelope.meta?.sources?.first?.count, 1)
+        XCTAssertEqual(envelope.links?["self"]!, "/api/proxy/v2/tracks?query=Lemon")
+        XCTAssertNil(envelope.links?["next"]!)
+    }
 }

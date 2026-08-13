@@ -51,6 +51,79 @@ export function callUpstreamV2 (config, request, resourcePath, searchParams, ext
     : fetch(url, init)
 }
 
+const STREAM_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+const MAX_STREAM_REDIRECTS = 4
+
+function streamRedirectFailure (detail) {
+  return Response.json({
+    type: 'about:blank',
+    title: 'Audio redirect rejected',
+    status: 502,
+    detail,
+    apiVersion: '2'
+  }, {
+    status: 502,
+    headers: { 'cache-control': 'no-store' }
+  })
+}
+
+function isPublicStreamDestination (destination) {
+  if (destination.protocol !== 'https:' || destination.username || destination.password || (destination.port && destination.port !== '443')) return false
+  const hostname = destination.hostname.toLowerCase().replace(/\.$/, '')
+  if (!hostname || hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local') || hostname.endsWith('.internal')) return false
+  // Provider CDNs use DNS names. Reject literal IPv6 and non-public IPv4 so a
+  // compromised upstream cannot turn the audio proxy into an internal probe.
+  if (hostname.includes(':')) return false
+  const parts = hostname.split('.')
+  if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) return true
+  const [first, second] = parts.map(Number)
+  return !(first === 0 || first === 10 || first === 127 || first >= 224 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && (second === 0 || second === 168)) ||
+    (first === 198 && (second === 18 || second === 19)))
+}
+
+/**
+ * Resolve provider CDN redirects without forwarding the Meting master token.
+ * Cloudflare's automatic `follow` mode forwards every request header even
+ * across origins, so each hop is deliberately rebuilt from a tiny allowlist.
+ */
+export async function followStreamRedirects (initial, request, fetcher = fetch) {
+  let response = initial
+  for (let hop = 0; STREAM_REDIRECT_STATUSES.has(response.status); hop += 1) {
+    if (hop >= MAX_STREAM_REDIRECTS) return streamRedirectFailure('Audio source redirected too many times.')
+    const location = response.headers.get('location')
+    try { await response.body?.cancel() } catch {}
+    if (!location) return streamRedirectFailure('Audio source returned a redirect without a destination.')
+
+    let destination
+    try {
+      destination = new URL(location)
+    } catch {
+      return streamRedirectFailure('Audio source returned an invalid redirect destination.')
+    }
+    if (!isPublicStreamDestination(destination)) {
+      return streamRedirectFailure('Audio source redirected to an unsafe destination.')
+    }
+
+    const headers = new Headers({ accept: '*/*' })
+    const range = request?.headers?.get('range')
+    if (range) headers.set('range', range)
+    try {
+      response = await fetcher(destination.toString(), {
+        method: 'GET',
+        headers,
+        redirect: 'manual'
+      })
+    } catch {
+      return streamRedirectFailure('Audio source redirect could not be reached.')
+    }
+  }
+  return response
+}
+
 function directApiUrl (request, config) {
   const incoming = new URL(request.url)
   if (config.musicApi.binding) {
@@ -383,7 +456,7 @@ async function proxyStream (request, config, source, id, searchParams) {
     params,
     { accept: '*/*' }
   )
-  return streamResponse(upstream)
+  return streamResponse(await followStreamRedirects(upstream, request))
 }
 
 async function discoverPlaylist (request, config, id, searchParams) {
