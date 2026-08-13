@@ -17,6 +17,8 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 播放可选择自动、无损、高品质、标准或省流档位，并展示曲目可用性
 - 音源失败时保留当前平台的原始错误，不进行跨平台备用或替换
 - OS 锁屏 / 蓝牙耳机 / 系统媒体控件（Media Session）
+- 无账号密码的 RMusic ID：使用 Face ID、Touch ID、Windows Hello 或设备 PIN 注册和登录
+- 设备密钥、登录会话和显示名称管理，并预留手机客户端 Bearer 会话能力
 
 所有收藏数据只保存在浏览器 `localStorage`。在线歌单会从分享链接识别平台；仅输入 ID 时由 Worker 自动探测。保存歌单时会把元信息和完整曲目写入本机快照，之后打开不再自动请求平台；需要最新内容时在歌单页点击“更新歌单”。
 
@@ -32,6 +34,12 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 6. 限流同时按 IP 和签名会话计算，默认各 `180` 次/分钟；签发会话另有默认 `12` 次/分钟限制。
 
 这套机制能阻止直接调用、跨站热链、Cookie 复制和大部分低成本滥用。由于网页本身是公开服务，任何不要求用户登录的方案都无法从密码学上区分“真实页面”和完整模拟浏览器的机器人；若需要抵御有意自动化，应在签发端点前再启用 RandallFlare/Cloudflare WAF 或 Turnstile。
+
+### RMusic ID 与设备密钥
+
+用户系统完全不收集账号、密码、邮箱或手机号。注册时浏览器创建 WebAuthn 可发现凭据，私钥保留在设备安全硬件或系统密码管理器中；服务端 D1 只保存随机用户标识、公开密钥、签名计数器和设备名称。登录时不先输入用户名，由设备密钥返回不透明的 user handle，再由服务端校验 challenge、来源域名、RP ID、用户验证结果、签名和计数器。
+
+网页会话使用 `__Host-rmusic_user` 的 `HttpOnly + Secure + SameSite=Strict` 不透明 Cookie，D1 只保存 token 的 SHA-256；默认有效 30 天，可在账号中心查看并注销其他会话。所有修改操作都要求严格同源，挑战五分钟过期且只可消费一次，注册端点另有限流。手机客户端可在 WebAuthn 验证后请求 `Bearer rmu_…` 会话，但必须先通过 `AUTH_NATIVE_ORIGINS` 明确允许客户端来源；iOS Associated Domains 和 Android Digital Asset Links 需在确定 Bundle ID、Team ID、包名和签名证书后再配置。
 
 站点同时暴露与 Meting 一致的 `/api/v2/*` REST 路径，方便以
 `music.bigrandall.io` 作为 API 域名。该路径不会注入服务端密钥，调用者仍必须在
@@ -58,6 +66,15 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | `GET /api/proxy/v2/streams/{source}/{id}/options` | 可用性、订阅要求和音质档位 |
 | `GET /api/proxy/v2/artworks/{source}/{id}` | V2 封面代理 |
 | `GET /api/proxy/v2/lyrics/{source}/{id}` | V2 歌词；`granularity=word` 为逐字歌词 |
+| `GET /api/auth/session` | 当前 RMusic ID 会话状态 |
+| `POST /api/auth/register/options` / `verify` | 创建账号及注册首个设备密钥 |
+| `POST /api/auth/login/options` / `verify` | 无用户名设备密钥登录 |
+| `GET /api/auth/devices` | 当前账号的设备密钥列表 |
+| `POST /api/auth/devices/options` / `verify` | 为当前账号添加设备密钥 |
+| `DELETE /api/auth/devices/{id}` | 移除设备密钥；不能移除最后一个 |
+| `GET /api/auth/sessions` | 当前账号的活跃网页/手机客户端会话 |
+| `DELETE /api/auth/sessions/{id}` | 注销指定会话 |
+| `PATCH /api/auth/profile` / `POST /api/auth/logout` | 修改显示名称 / 退出登录 |
 
 根路径支持轻量 deep link：
 
@@ -92,12 +109,19 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 | `MUSIC_API` | 优先 | 指向 Meting-API worker 的 RandallFlare service binding |
 | `MUSIC_API_URL` | fallback | 未使用 service binding 时的公网地址，如 `https://music.rapi.rest` |
 | `MUSIC_API_TOKEN` | 是 | 与 Meting-API 的 `METING_TOKEN` 相同，仅由 Worker 使用 |
+| `AUTH_DB` | 是（用户系统） | 保存 RMusic ID、公开密钥、一次性 challenge 和哈希会话的 D1 binding |
 | `PROXY_SIGNING_SECRET` | 推荐 | 至少 32 字节的随机代理会话 HMAC 密钥；未设置时兼容性回退到 `MUSIC_API_TOKEN` |
 | `PROXY_SESSION_TTL_SECONDS` | 否 | 代理会话有效期，默认 `7200`，范围 300–86400 秒 |
 | `PROXY_SESSION_RATE_WINDOW_MS` | 否 | 会话签发限流窗口，默认 `60000` |
 | `PROXY_SESSION_RATE_MAX` | 否 | 单 IP 每窗口最多签发次数，默认 `12` |
 | `RATE_WINDOW_MS` | 否 | 限流窗口，默认 `60000` |
 | `RATE_MAX` | 否 | 每个窗口的单 IP、单会话请求上限，默认 `180` |
+| `AUTH_SESSION_DAYS` | 否 | RMusic ID 会话有效天数，默认 `30`，范围 1–365 |
+| `AUTH_ORIGIN` | 否 | WebAuthn 预期网页来源；默认由当前请求的 HTTPS origin 推导 |
+| `AUTH_RP_ID` | 否 | WebAuthn RP ID；默认当前 hostname |
+| `AUTH_NATIVE_ORIGINS` | 否 | 允许签发手机客户端 Bearer 会话的 WebAuthn origins，逗号分隔 |
+| `AUTH_RATE_MAX` | 否 | 单 IP 每分钟用户接口上限，默认 `60` |
+| `AUTH_REGISTRATION_RATE_MAX` | 否 | 单 IP 每小时创建账号请求上限，默认 `10` |
 | `LOG_LEVEL` | 否 | `trace` / `debug` / `info` / `warn` / `error` |
 
 `MUSIC_API` 与 `MUSIC_API_URL` 至少设置一个；两者同时存在时优先走 service binding。
@@ -110,6 +134,7 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 4. 绑定 `MUSIC_API` 到 Meting-API worker。
 5. 设置 `MUSIC_API_TOKEN`。
 6. 生成独立随机密钥并作为 secret 设置到 `PROXY_SIGNING_SECRET`；轮换此值会立即使旧代理会话失效。
+7. 创建专用 D1 数据库，并以 `AUTH_DB` 绑定到项目。认证表会在首次请求时幂等创建。
 
 项目未使用 Node 内置模块，不需要 `nodejs_compat`。
 
@@ -131,6 +156,7 @@ src/
 ├── config.js          环境变量与 service binding 配置
 ├── rate-limit.js      per-IP 滑动窗口限流
 ├── proxy-session.js   HMAC 会话签发、校验、IP 绑定与私有缓存策略
+├── auth.js            WebAuthn 注册/登录、设备密钥与用户会话管理
 ├── api-proxy.js       token 注入、资源流转发与 JSON URL 重写
 └── widget/
     ├── index.html     完整应用结构
@@ -141,7 +167,7 @@ build.mjs              esbuild 打包与资源 hash
 
 ## 浏览器数据
 
-以下内容保存在当前域名的 `localStorage`：
+音乐库的以下内容保存在当前域名的 `localStorage`，不会因为登录自动上传：
 
 - 音量、随机与循环模式
 - 最近播放（最多 30 首）
@@ -151,3 +177,5 @@ build.mjs              esbuild 打包与资源 hash
 - 首页发现内容（10 分钟）和播放音质偏好
 
 歌单快照采用精简曲目结构以节省空间。浏览器的 `localStorage` 配额通常有限；空间不足时页面会保留歌单定义并提示缓存失败。更换域名或清除浏览器站点数据会清空这些本地收藏。
+
+RMusic ID 本身及其设备公开密钥、登录会话保存在 `AUTH_DB`。这为后续手机客户端和跨设备同步打下身份基础，但本版本不会擅自把本地收藏或播放历史同步到服务器。

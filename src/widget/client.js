@@ -1,3 +1,9 @@
+import {
+  browserSupportsWebAuthn,
+  startAuthentication,
+  startRegistration
+} from '@simplewebauthn/browser'
+
 /* RMusic full-page player.
  *
  * The browser only calls the same-origin /api/proxy/v2 REST surface. The
@@ -132,7 +138,29 @@
     playlistForm: $('playlist-form'),
     playlistId: $('playlist-id'),
     playlistFormError: $('playlist-form-error'),
-    loadPlaylistButton: $('loadPlaylistButton')
+    loadPlaylistButton: $('loadPlaylistButton'),
+    openAccount: $('openAccount'),
+    mobileAccount: $('mobileAccount'),
+    accountAvatar: $('accountAvatar'),
+    accountTriggerLabel: $('accountTriggerLabel'),
+    accountModal: $('account-modal'),
+    closeAccountModal: $('closeAccountModal'),
+    accountLoading: $('accountLoading'),
+    accountError: $('accountError'),
+    accountAnonymous: $('accountAnonymous'),
+    accountProfile: $('accountProfile'),
+    registrationDisplayName: $('registrationDisplayName'),
+    registerPasskey: $('registerPasskey'),
+    loginPasskey: $('loginPasskey'),
+    profileAvatar: $('profileAvatar'),
+    profileName: $('profileName'),
+    profileId: $('profileId'),
+    profileNameForm: $('profileNameForm'),
+    profileDisplayName: $('profileDisplayName'),
+    addPasskey: $('addPasskey'),
+    passkeyList: $('passkeyList'),
+    sessionList: $('sessionList'),
+    logoutAccount: $('logoutAccount')
   }
 
   const STORAGE = {
@@ -166,6 +194,14 @@
     openPanel: null,
     loadingAudio: false,
     consecutiveErrors: 0,
+    account: {
+      available: true,
+      authenticated: false,
+      user: null,
+      session: null,
+      devices: [],
+      sessions: []
+    },
     quality: ['auto', 'lossless', 'high', 'standard', 'low'].includes(readStorage(STORAGE.quality))
       ? readStorage(STORAGE.quality)
       : 'auto'
@@ -401,6 +437,396 @@
     }
     return response
   }
+
+  /* ---------- RMusic account / Passkeys ---------- */
+
+  async function authFetch (path, options = {}) {
+    const init = {
+      method: options.method || 'GET',
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' }
+    }
+    if (Object.hasOwn(options, 'body')) {
+      init.headers['content-type'] = 'application/json'
+      init.body = JSON.stringify(options.body)
+    }
+    const response = await fetch('/api/auth' + path, init)
+    const raw = await response.text().catch(() => '')
+    let body = null
+    try { body = raw ? JSON.parse(raw) : null } catch {}
+    if (!response.ok) {
+      const error = new Error(body?.detail || body?.message || raw || ('账号请求失败 (' + response.status + ')'))
+      error.status = response.status
+      error.title = body?.title || ''
+      throw error
+    }
+    return body
+  }
+
+  function accountInitials (name) {
+    return initials(name || 'RM')
+  }
+
+  function accountDate (timestamp) {
+    if (!Number.isFinite(Number(timestamp))) return '未知时间'
+    try {
+      return new Intl.DateTimeFormat('zh-CN', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }).format(new Date(Number(timestamp)))
+    } catch {
+      return new Date(Number(timestamp)).toLocaleString()
+    }
+  }
+
+  function sessionDeviceName (session) {
+    if (session.kind === 'native') return 'RMusic 手机客户端'
+    const agent = session.userAgent || ''
+    if (/iphone|ipad/i.test(agent)) return 'Safari · Apple 移动设备'
+    if (/android/i.test(agent)) return '浏览器 · Android 设备'
+    if (/macintosh/i.test(agent)) return '浏览器 · Mac'
+    if (/windows/i.test(agent)) return '浏览器 · Windows'
+    if (/linux/i.test(agent)) return '浏览器 · Linux'
+    return 'RMusic 网页'
+  }
+
+  function deviceName () {
+    const platform = navigator.userAgentData?.platform || navigator.platform || ''
+    if (/iphone|ipad|mac/i.test(platform)) return 'Apple 设备'
+    if (/android/i.test(platform) || /android/i.test(navigator.userAgent)) return 'Android 设备'
+    if (/win/i.test(platform)) return 'Windows 设备'
+    if (/linux/i.test(platform)) return 'Linux 设备'
+    return '当前设备'
+  }
+
+  function accountIcon (symbol) {
+    const wrap = document.createElement('span')
+    wrap.className = 'account-list-icon'
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('class', 'icon')
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use')
+    use.setAttribute('href', '#' + symbol)
+    svg.appendChild(use)
+    wrap.appendChild(svg)
+    return wrap
+  }
+
+  function setAccountError (message = '') {
+    els.accountError.textContent = message
+    els.accountError.hidden = !message
+  }
+
+  function setAccountBusy (busy, message = '正在验证设备密钥…') {
+    els.accountLoading.querySelector('p').textContent = message
+    els.accountLoading.hidden = !busy
+    els.accountAnonymous.hidden = busy || state.account.authenticated
+    els.accountProfile.hidden = busy || !state.account.authenticated
+    ;[els.registerPasskey, els.loginPasskey, els.addPasskey, els.logoutAccount].forEach((button) => { button.disabled = busy })
+  }
+
+  function updateAccountTrigger () {
+    const user = state.account.user
+    const signedIn = state.account.authenticated && user
+    els.openAccount.classList.toggle('signed-in', Boolean(signedIn))
+    els.accountTriggerLabel.textContent = signedIn ? user.displayName : '登录'
+    els.accountAvatar.textContent = ''
+    if (signedIn) {
+      els.accountAvatar.textContent = accountInitials(user.displayName)
+      els.mobileAccount.setAttribute('aria-label', '账号：' + user.displayName)
+    } else {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      svg.setAttribute('class', 'icon')
+      const use = document.createElementNS('http://www.w3.org/2000/svg', 'use')
+      use.setAttribute('href', '#i-user')
+      svg.appendChild(use)
+      els.accountAvatar.appendChild(svg)
+      els.mobileAccount.setAttribute('aria-label', '打开账号')
+    }
+  }
+
+  function renderPasskeys () {
+    els.passkeyList.textContent = ''
+    if (!state.account.devices.length) {
+      const empty = document.createElement('p')
+      empty.className = 'account-list-empty'
+      empty.textContent = '暂时没有可管理的设备密钥。'
+      els.passkeyList.appendChild(empty)
+      return
+    }
+    const fragment = document.createDocumentFragment()
+    state.account.devices.forEach((device) => {
+      const row = document.createElement('div')
+      row.className = 'account-list-row'
+      row.appendChild(accountIcon('i-key'))
+      const copy = document.createElement('div')
+      copy.className = 'account-list-copy'
+      const name = document.createElement('strong')
+      name.textContent = device.name || '设备密钥'
+      const meta = document.createElement('span')
+      const backup = device.backedUp ? '可同步' : '仅此设备'
+      meta.textContent = backup + ' · ' + (device.lastUsedAt ? '使用于 ' + accountDate(device.lastUsedAt) : '创建于 ' + accountDate(device.createdAt))
+      copy.append(name, meta)
+      row.appendChild(copy)
+      const remove = document.createElement('button')
+      remove.className = 'account-list-action'
+      remove.type = 'button'
+      remove.textContent = state.account.devices.length <= 1 ? '需保留' : '移除'
+      remove.disabled = state.account.devices.length <= 1
+      remove.addEventListener('click', () => removePasskey(device))
+      row.appendChild(remove)
+      fragment.appendChild(row)
+    })
+    els.passkeyList.appendChild(fragment)
+  }
+
+  function renderSessions () {
+    els.sessionList.textContent = ''
+    if (!state.account.sessions.length) {
+      const empty = document.createElement('p')
+      empty.className = 'account-list-empty'
+      empty.textContent = '暂时没有活跃会话。'
+      els.sessionList.appendChild(empty)
+      return
+    }
+    const fragment = document.createDocumentFragment()
+    state.account.sessions.forEach((session) => {
+      const row = document.createElement('div')
+      row.className = 'account-list-row'
+      row.appendChild(accountIcon('i-user'))
+      const copy = document.createElement('div')
+      copy.className = 'account-list-copy'
+      const name = document.createElement('strong')
+      name.textContent = sessionDeviceName(session)
+      const meta = document.createElement('span')
+      meta.textContent = '最近活动 ' + accountDate(session.lastUsedAt) + ' · ' + accountDate(session.expiresAt) + ' 到期'
+      copy.append(name, meta)
+      row.appendChild(copy)
+      if (session.current) {
+        const current = document.createElement('span')
+        current.className = 'account-current'
+        current.textContent = '当前设备'
+        row.appendChild(current)
+      } else {
+        const revoke = document.createElement('button')
+        revoke.className = 'account-list-action'
+        revoke.type = 'button'
+        revoke.textContent = '退出'
+        revoke.addEventListener('click', () => revokeAccountSession(session))
+        row.appendChild(revoke)
+      }
+      fragment.appendChild(row)
+    })
+    els.sessionList.appendChild(fragment)
+  }
+
+  function renderAccount () {
+    updateAccountTrigger()
+    els.accountAnonymous.hidden = state.account.authenticated
+    els.accountProfile.hidden = !state.account.authenticated
+    if (!state.account.authenticated || !state.account.user) return
+    const user = state.account.user
+    els.profileAvatar.textContent = accountInitials(user.displayName)
+    els.profileName.textContent = user.displayName
+    els.profileId.textContent = 'RMusic ID · ' + user.id.slice(0, 8).toUpperCase()
+    els.profileDisplayName.value = user.displayName
+    renderPasskeys()
+    renderSessions()
+  }
+
+  async function refreshAccount (details = false) {
+    try {
+      const status = await authFetch('/session')
+      state.account.available = true
+      state.account.authenticated = Boolean(status?.authenticated)
+      state.account.user = status?.user || null
+      state.account.session = status?.session || null
+      if (state.account.authenticated && details) {
+        const [devices, sessions] = await Promise.all([
+          authFetch('/devices'),
+          authFetch('/sessions')
+        ])
+        state.account.devices = devices?.devices || []
+        state.account.sessions = sessions?.sessions || []
+      } else if (!state.account.authenticated) {
+        state.account.devices = []
+        state.account.sessions = []
+      }
+      renderAccount()
+      return status
+    } catch (error) {
+      if (error.status === 401) {
+        state.account.authenticated = false
+        state.account.user = null
+        renderAccount()
+        return null
+      }
+      state.account.available = false
+      throw error
+    }
+  }
+
+  function passkeyErrorMessage (error) {
+    if (error?.name === 'NotAllowedError') return '设备密钥操作已取消，或验证等待超时。'
+    if (error?.name === 'InvalidStateError') return '这个设备密钥已经注册，请换一个设备或直接登录。'
+    if (error?.name === 'SecurityError') return '当前域名或安全环境不允许使用设备密钥。'
+    return error?.message || '设备密钥操作失败，请重试。'
+  }
+
+  function requirePasskeySupport () {
+    if (!window.isSecureContext || !browserSupportsWebAuthn()) {
+      throw new Error('当前浏览器不支持设备密钥，请使用最新版 Safari、Chrome 或 Edge。')
+    }
+  }
+
+  async function runPasskeyAction (message, action) {
+    setAccountError()
+    setAccountBusy(true, message)
+    try {
+      requirePasskeySupport()
+      await action()
+    } catch (error) {
+      setAccountError(passkeyErrorMessage(error))
+    } finally {
+      setAccountBusy(false)
+      renderAccount()
+    }
+  }
+
+  async function registerAccount () {
+    await runPasskeyAction('正在创建设备密钥…', async () => {
+      const begin = await authFetch('/register/options', {
+        method: 'POST',
+        body: { displayName: els.registrationDisplayName.value }
+      })
+      const response = await startRegistration({ optionsJSON: begin.options })
+      const result = await authFetch('/register/verify', {
+        method: 'POST',
+        body: { flowId: begin.flowId, response, deviceName: deviceName() }
+      })
+      state.account.authenticated = true
+      state.account.user = result.user
+      state.account.session = result.session
+      await refreshAccount(true)
+      toast('RMusic 账号创建成功')
+    })
+  }
+
+  async function loginAccount () {
+    await runPasskeyAction('正在等待设备密钥…', async () => {
+      const begin = await authFetch('/login/options', { method: 'POST', body: {} })
+      const response = await startAuthentication({ optionsJSON: begin.options })
+      const result = await authFetch('/login/verify', {
+        method: 'POST',
+        body: { flowId: begin.flowId, response }
+      })
+      state.account.authenticated = true
+      state.account.user = result.user
+      state.account.session = result.session
+      await refreshAccount(true)
+      toast('已使用设备密钥登录')
+    })
+  }
+
+  async function addAccountPasskey () {
+    await runPasskeyAction('正在添加设备密钥…', async () => {
+      const begin = await authFetch('/devices/options', { method: 'POST', body: {} })
+      const response = await startRegistration({ optionsJSON: begin.options })
+      await authFetch('/devices/verify', {
+        method: 'POST',
+        body: { flowId: begin.flowId, response, deviceName: deviceName() }
+      })
+      await refreshAccount(true)
+      toast('新的设备密钥已添加')
+    })
+  }
+
+  async function removePasskey (device) {
+    if (!window.confirm('确认移除“' + (device.name || '这个设备密钥') + '”？移除后该设备可能无法再次登录。')) return
+    setAccountError()
+    try {
+      await authFetch('/devices/' + encodeURIComponent(device.id), { method: 'DELETE' })
+      await refreshAccount(true)
+      toast('设备密钥已移除')
+    } catch (error) {
+      setAccountError(error.message)
+    }
+  }
+
+  async function revokeAccountSession (session) {
+    setAccountError()
+    try {
+      await authFetch('/sessions/' + encodeURIComponent(session.id), { method: 'DELETE' })
+      await refreshAccount(true)
+      toast('登录会话已退出')
+    } catch (error) {
+      setAccountError(error.message)
+    }
+  }
+
+  async function logoutAccount () {
+    setAccountError()
+    setAccountBusy(true, '正在安全退出…')
+    try {
+      await authFetch('/logout', { method: 'POST', body: {} })
+      state.account.authenticated = false
+      state.account.user = null
+      state.account.session = null
+      state.account.devices = []
+      state.account.sessions = []
+      renderAccount()
+      toast('已退出 RMusic 账号')
+    } catch (error) {
+      setAccountError(error.message)
+    } finally {
+      setAccountBusy(false)
+      renderAccount()
+    }
+  }
+
+  async function openAccountModal () {
+    els.accountModal.hidden = false
+    setAccountError()
+    setAccountBusy(true, '正在读取账号状态…')
+    try {
+      await refreshAccount(true)
+    } catch (error) {
+      setAccountError(error.message)
+    } finally {
+      setAccountBusy(false)
+      renderAccount()
+    }
+  }
+
+  function closeAccountModal () {
+    els.accountModal.hidden = true
+    setAccountError()
+  }
+
+  els.openAccount.addEventListener('click', openAccountModal)
+  els.mobileAccount.addEventListener('click', openAccountModal)
+  els.closeAccountModal.addEventListener('click', closeAccountModal)
+  els.accountModal.addEventListener('click', (event) => { if (event.target === els.accountModal) closeAccountModal() })
+  els.registerPasskey.addEventListener('click', registerAccount)
+  els.loginPasskey.addEventListener('click', loginAccount)
+  els.addPasskey.addEventListener('click', addAccountPasskey)
+  els.logoutAccount.addEventListener('click', logoutAccount)
+  els.profileNameForm.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    setAccountError()
+    try {
+      const result = await authFetch('/profile', {
+        method: 'PATCH',
+        body: { displayName: els.profileDisplayName.value }
+      })
+      state.account.user = result.user
+      renderAccount()
+      toast('显示名称已更新')
+    } catch (error) {
+      setAccountError(error.message)
+    }
+  })
 
   async function fetchV2 (path, params, signal) {
     const query = params ? new URLSearchParams(params).toString() : ''
@@ -2137,7 +2563,8 @@
   document.addEventListener('keydown', (event) => {
     const editing = /^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName)
     if (event.key === 'Escape') {
-      if (!els.playlistModal.hidden) closePlaylistModal()
+      if (!els.accountModal.hidden) closeAccountModal()
+      else if (!els.playlistModal.hidden) closePlaylistModal()
       else if (state.openPanel) openPanel(state.openPanel)
       return
     }
@@ -2177,6 +2604,10 @@
     }
     renderHome()
     renderLibrary()
+    refreshAccount(false).catch(() => {
+      state.account.available = false
+      renderAccount()
+    })
 
     const url = new URL(location.href)
     const type = url.searchParams.get('type')
@@ -2201,7 +2632,10 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') ensureProxySession().catch(() => {})
+    if (document.visibilityState === 'visible') {
+      ensureProxySession().catch(() => {})
+      refreshAccount(false).catch(() => {})
+    }
   })
 
   boot().catch((error) => toast(error.message, 'error'))

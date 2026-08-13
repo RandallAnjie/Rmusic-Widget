@@ -13,10 +13,21 @@ import { build, transform } from 'esbuild'
 
 const read = (p) => fs.readFileSync(p, 'utf8')
 
-const [{ code: widgetCss }, { code: widgetJs }] = await Promise.all([
+const [{ code: widgetCss }, widgetBuild] = await Promise.all([
   transform(read('src/widget/index.css'), { loader: 'css', minify: true }),
-  transform(read('src/widget/client.js'), { loader: 'js', minify: true, target: 'es2022' })
+  build({
+    entryPoints: ['src/widget/client.js'],
+    bundle: true,
+    format: 'iife',
+    platform: 'browser',
+    target: 'es2022',
+    minify: true,
+    legalComments: 'none',
+    write: false,
+    logLevel: 'silent'
+  })
 ])
+const widgetJs = widgetBuild.outputFiles[0].text
 
 function compressedBase64 (value, encoding) {
   const bytes = Buffer.from(value)
@@ -48,6 +59,7 @@ await build({
   format: 'esm',
   target: 'esnext',
   platform: 'neutral',
+  mainFields: ['browser', 'module', 'main'],
   conditions: ['worker', 'browser', 'import', 'default'],
   define: {
     __WIDGET_HTML__: JSON.stringify(widgetHtml),

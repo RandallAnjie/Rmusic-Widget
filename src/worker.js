@@ -20,6 +20,7 @@
 import { buildConfig } from './config.js'
 import { checkRate, clientIp } from './rate-limit.js'
 import { passThroughApiV2, proxyApiV2 } from './api-proxy.js'
+import { handleAuth } from './auth.js'
 import {
   issueProxySession,
   privateProxyResponse,
@@ -143,6 +144,13 @@ function staticResponse (request, kind, value, contentType, cacheControl, etag) 
     etag,
     vary: 'Accept-Encoding'
   })
+  if (kind === 'html') {
+    headers.set('content-security-policy', "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; manifest-src 'self'")
+    headers.set('permissions-policy', 'publickey-credentials-create=(self), publickey-credentials-get=(self), microphone=(), camera=(), geolocation=()')
+    headers.set('referrer-policy', 'no-referrer')
+    headers.set('x-content-type-options', 'nosniff')
+    headers.set('x-frame-options', 'DENY')
+  }
   const candidates = request.headers.get('accept-encoding') || ''
   let body = value
   if (/\bbr\b/.test(candidates)) {
@@ -163,11 +171,22 @@ function staticResponse (request, kind, value, contentType, cacheControl, etag) 
   })
 }
 
-async function route (request, env) {
+async function route (request, env, context) {
   const url = new URL(request.url)
   const config = buildConfig(env)
 
   if (request.method === 'OPTIONS') return optionsResponse(request)
+
+  if (url.pathname === '/api/auth' || url.pathname.startsWith('/api/auth/')) {
+    const ip = clientIp(request)
+    const decision = checkRate(`auth:${ip}`, config.auth.rate)
+    if (!decision.allowed) return rateLimitResponse(decision)
+    if (url.pathname === '/api/auth/register/options' && request.method === 'POST') {
+      const registrationDecision = checkRate(`auth-register:${ip}`, config.auth.registrationRate)
+      if (!registrationDecision.allowed) return rateLimitResponse(registrationDecision)
+    }
+    return handleAuth(request, env, context)
+  }
 
   if (url.pathname === '/api/proxy/session') {
     if (request.method !== 'POST') return plain(405, 'method not allowed\n')
@@ -302,9 +321,9 @@ function rateLimitResponse (decision) {
 }
 
 export default {
-  async fetch (request, env) {
+  async fetch (request, env, context) {
     try {
-      const response = await route(request, env)
+      const response = await route(request, env, context)
       return withCors(request, response)
     } catch (err) {
       const message = err && err.message ? err.message : String(err)

@@ -40,6 +40,16 @@ export function buildConfig (env) {
         max: boundedNumber(env.PROXY_SESSION_RATE_MAX, 12, 1, 1_000)
       }
     },
+    auth: {
+      rate: {
+        windowMs: boundedNumber(env.AUTH_RATE_WINDOW_MS, 60_000, 1_000, 3_600_000),
+        max: boundedNumber(env.AUTH_RATE_MAX, 60, 5, 1_000)
+      },
+      registrationRate: {
+        windowMs: boundedNumber(env.AUTH_REGISTRATION_RATE_WINDOW_MS, 3_600_000, 60_000, 86_400_000),
+        max: boundedNumber(env.AUTH_REGISTRATION_RATE_MAX, 10, 1, 100)
+      }
+    },
     rate: {
       // The full-page app can load a visible grid of covers alongside
       // search, lyrics and audio requests. Keep the limit protective
