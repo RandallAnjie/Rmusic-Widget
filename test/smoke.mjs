@@ -6,6 +6,11 @@ import { FakeD1 } from './fake-d1.mjs'
 
 const calls = []
 
+async function tokenHash (value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Buffer.from(digest).toString('base64url')
+}
+
 function v2Track (overrides = {}) {
   const source = overrides.source || 'netease'
   const id = overrides.id || 'track-1'
@@ -251,6 +256,7 @@ const sourceHtml = fs.readFileSync(new URL('../src/widget/index.html', import.me
 const clientSource = fs.readFileSync(new URL('../src/widget/client.js', import.meta.url), 'utf8')
 const sourceCss = fs.readFileSync(new URL('../src/widget/index.css', import.meta.url), 'utf8')
 const proxySource = fs.readFileSync(new URL('../src/api-proxy.js', import.meta.url), 'utf8')
+const librarySource = fs.readFileSync(new URL('../src/library.js', import.meta.url), 'utf8')
 const htmlIds = [...sourceHtml.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1])
 assert.equal(new Set(htmlIds).size, htmlIds.length, 'HTML must not contain duplicate IDs')
 const referencedIds = [...clientSource.matchAll(/(?<!\$)\$\('([^']+)'\)/g)].map((match) => match[1])
@@ -266,7 +272,7 @@ assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-save"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-name"/)
 assert.match(sourceHtml, /无需选择平台/)
-assert.match(sourceHtml, /完整曲目会直接保存到本机/)
+assert.match(sourceHtml, /完整曲目会直接保存到账号/)
 assert.match(clientSource, /const API = '\/api\/proxy\/v2'/)
 assert.match(clientSource, /const PROXY_SESSION_ENDPOINT = '\/api\/proxy\/session'/)
 assert.match(clientSource, /async function ensureProxySession/)
@@ -281,8 +287,12 @@ assert.match(clientSource, /view: 'compact'/)
 assert.match(clientSource, /refresh: 'true'/)
 assert.match(clientSource, /function migrateLegacyResourceUrl/)
 assert.match(clientSource, /playlistCachePrefix: 'rmusic_playlist_cache_v1:'/)
-assert.match(clientSource, /function readPlaylistCache/)
-assert.match(clientSource, /function writePlaylistCache/)
+assert.match(clientSource, /async function readPlaylistCache/)
+assert.match(clientSource, /async function loadAccountLibrary/)
+assert.doesNotMatch(clientSource, /writeJson\(STORAGE\.(?:favorites|recent|playlists)/)
+assert.match(librarySource, /MAX_FAVORITES = 200/)
+assert.match(librarySource, /MAX_RECENT = 30/)
+assert.match(librarySource, /MAX_PLAYLISTS = 60/)
 assert.match(clientSource, /startRegistration/)
 assert.match(clientSource, /startAuthentication/)
 assert.match(clientSource, /savePlaylistDefinition\(loaded\)/)
@@ -324,6 +334,9 @@ assert.match(await js.text(), /rmusic_favorites_v2/)
 const anonymousAccount = await request('/api/auth/session')
 assert.equal(anonymousAccount.status, 200)
 assert.deepEqual(await anonymousAccount.json(), { authenticated: false })
+const anonymousLibrary = await request('/api/auth/library')
+assert.equal(anonymousLibrary.status, 401)
+assert.match(anonymousLibrary.headers.get('www-authenticate'), /^Passkey/)
 
 const crossOriginRegistration = await request('/api/auth/register/options', {
   method: 'POST',
@@ -406,6 +419,11 @@ const directQueryToken = await request('/api/v2?token=server-only-secret')
 assert.equal(directQueryToken.status, 200)
 assert.equal(calls.at(-1).url.searchParams.get('token'), 'server-only-secret')
 
+const directTokenStream = await request('/api/v2/streams/netease/audio-1', {
+  headers: { authorization: 'Bearer server-only-secret' }
+})
+assert.equal(directTokenStream.status, 200)
+
 const unauthenticatedProxyCallStart = calls.length
 const unauthenticatedProxy = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=netease')
 assert.equal(unauthenticatedProxy.status, 401)
@@ -449,14 +467,125 @@ const sessionBody = await sessionResponse.json()
 assert.equal(sessionBody.authenticated, true)
 assert.ok(sessionBody.expiresAt > sessionBody.refreshAfter)
 const proxyCookie = setCookie.split(';')[0]
+let accountCookie = ''
 
 function proxyRequest (path, init = {}) {
   const headers = new Headers(init.headers)
-  headers.set('cookie', proxyCookie)
+  headers.set('cookie', [proxyCookie, accountCookie].filter(Boolean).join('; '))
   headers.set('cf-connecting-ip', '203.0.113.99')
   headers.set('sec-fetch-site', 'same-origin')
   return request(path, { ...init, headers })
 }
+
+const anonymousStreamCallStart = calls.length
+const anonymousStream = await proxyRequest('/api/proxy/v2/streams/netease/audio-1')
+assert.equal(anonymousStream.status, 401)
+assert.match(anonymousStream.headers.get('www-authenticate'), /^Passkey/)
+assert.equal(calls.length, anonymousStreamCallStart, 'signed proxy session without an RMusic account must not reach an audio upstream')
+const anonymousTrailingSlashStream = await proxyRequest('/api/proxy/v2/streams/netease/audio-1/')
+assert.equal(anonymousTrailingSlashStream.status, 401)
+assert.equal(calls.length, anonymousStreamCallStart, 'a trailing slash must not bypass playback authentication')
+
+const accountToken = 'rmu_smoke_account_token'
+const accountUserId = 'smoke-user-1'
+const now = Date.now()
+await env.AUTH_DB.batch([
+  env.AUTH_DB.prepare(`
+    INSERT INTO rmusic_users (id, user_handle, display_name, created_at, updated_at, last_login_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(accountUserId, 'c21va2UtdXNlci1oYW5kbGU', 'Smoke Account', now, now, now),
+  env.AUTH_DB.prepare(`
+    INSERT INTO rmusic_user_sessions
+      (id, token_hash, user_id, kind, created_at, expires_at, last_used_at, user_agent, last_ip_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind('smoke-session-1', await tokenHash(accountToken), accountUserId, 'web', now, now + 86_400_000, now, 'Smoke Browser', 'smoke-ip')
+])
+accountCookie = `__Host-rmusic_user=${accountToken}`
+
+function libraryRequest (path, { method = 'GET', body, origin = 'https://rmusic.test' } = {}) {
+  const headers = new Headers({ cookie: accountCookie, origin, 'sec-fetch-site': origin === 'https://rmusic.test' ? 'same-origin' : 'cross-site' })
+  if (body !== undefined) headers.set('content-type', 'application/json')
+  return request('/api/auth/library' + path, {
+    method,
+    headers,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {})
+  })
+}
+
+const accountStatus = await request('/api/auth/session', { headers: { cookie: accountCookie } })
+assert.equal((await accountStatus.json()).user.id, accountUserId)
+const emptyLibrary = await libraryRequest('')
+assert.equal(emptyLibrary.status, 200)
+assert.equal((await emptyLibrary.json()).empty, true)
+
+const storedTrack = {
+  id: 'track-1',
+  server: 'netease',
+  title: 'Night Drive',
+  author: 'RMusic',
+  artists: [{ id: 'artist-1', name: 'RMusic' }],
+  album: { id: 'album-1', name: 'City Lights' },
+  url: '/api/proxy/v2/streams/netease/audio-1',
+  pic: '/api/proxy/v2/artworks/netease/cover-1',
+  lrc: '/api/proxy/v2/lyrics/netease/lyric-1',
+  duration_ms: 213000
+}
+const crossOriginFavorite = await libraryRequest('/favorites', {
+  method: 'PUT',
+  body: { track: storedTrack },
+  origin: 'https://attacker.example'
+})
+assert.equal(crossOriginFavorite.status, 403)
+
+const favoriteWrite = await libraryRequest('/favorites', { method: 'PUT', body: { track: storedTrack } })
+assert.equal(favoriteWrite.status, 200)
+const recentWrite = await libraryRequest('/recent', { method: 'POST', body: { track: storedTrack } })
+assert.equal(recentWrite.status, 200)
+const playlistSnapshot = {
+  version: 2,
+  server: 'netease',
+  id: '3778678',
+  name: 'Smoke Playlist',
+  cover: '/api/proxy/v2/artworks/netease/cover-1',
+  description: 'Stored in the account library.',
+  creator: { id: 'creator-1', name: 'Randall' },
+  stats: { trackCount: 1 },
+  tracks: [storedTrack],
+  cachedAt: now,
+  savedAt: now
+}
+const playlistWrite = await libraryRequest('/playlists/netease/3778678', { method: 'PUT', body: { playlist: playlistSnapshot } })
+assert.equal(playlistWrite.status, 201)
+const storedPlaylist = await libraryRequest('/playlists/netease/3778678')
+assert.equal(storedPlaylist.status, 200)
+assert.equal((await storedPlaylist.json()).playlist.tracks[0].url, '/api/proxy/v2/streams/netease/audio-1')
+const populatedLibrary = await libraryRequest('')
+const populatedData = await populatedLibrary.json()
+assert.equal(populatedData.empty, false)
+assert.equal(populatedData.favorites.length, 1)
+assert.equal(populatedData.recent.length, 1)
+assert.equal(populatedData.playlists.length, 1)
+
+const secondAccountToken = 'rmu_smoke_second_account_token'
+await env.AUTH_DB.batch([
+  env.AUTH_DB.prepare(`
+    INSERT INTO rmusic_users (id, user_handle, display_name, created_at, updated_at, last_login_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind('smoke-user-2', 'c21va2UtdXNlci0yLWhhbmRsZQ', 'Second Account', now, now, now),
+  env.AUTH_DB.prepare(`
+    INSERT INTO rmusic_user_sessions
+      (id, token_hash, user_id, kind, created_at, expires_at, last_used_at, user_agent, last_ip_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind('smoke-session-2', await tokenHash(secondAccountToken), 'smoke-user-2', 'web', now, now + 86_400_000, now, 'Smoke Browser 2', 'smoke-ip-2')
+])
+accountCookie = `__Host-rmusic_user=${secondAccountToken}`
+const isolatedLibrary = await libraryRequest('')
+assert.equal(isolatedLibrary.status, 200)
+assert.equal((await isolatedLibrary.json()).empty, true, 'D1 library rows must be isolated by user')
+accountCookie = `__Host-rmusic_user=${accountToken}`
+
+const refusedImport = await libraryRequest('/import', { method: 'POST', body: { favorites: [], recent: [], playlists: [] } })
+assert.equal(refusedImport.status, 409)
 
 const tamperedCookie = proxyCookie.slice(0, -1) + (proxyCookie.endsWith('A') ? 'B' : 'A')
 const tamperedProxy = await request('/api/proxy/v2/sources', {

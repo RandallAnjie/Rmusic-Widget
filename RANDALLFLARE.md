@@ -8,7 +8,7 @@
 4. 添加 service binding：`MUSIC_API` → Meting-API worker。
 5. 添加环境变量：`MUSIC_API_TOKEN`，值与 Meting-API 的 `METING_TOKEN` 一致。
 6. 添加 secret：`PROXY_SIGNING_SECRET`，使用独立的 32 字节以上随机值。
-7. 创建 D1 数据库并以 `AUTH_DB` 绑定到 Pages 项目，用于 RMusic ID 和设备密钥。
+7. 创建 D1 数据库并以 `AUTH_DB` 绑定到 Pages 项目，用于 RMusic ID、设备密钥和个人音乐库；执行 `migrations/0001_passkey_auth.sql` 与 `migrations/0002_account_library.sql`。
 
 如果两个 worker 不在同一租户，可以不设置 `MUSIC_API`，改用：
 
@@ -42,7 +42,9 @@ AUTH_REGISTRATION_RATE_MAX=10
 - `/api/proxy/v2` 不返回 `Access-Control-Allow-Origin: *`，成功响应使用 `private` 缓存，并同时按 IP 与会话限流
 - `music.bigrandall.io/api/v2/*` 可作为完整 V2 API 使用；必须由调用者发送 token，服务端不会为该路径注入密钥
 - 通过“添加歌单”粘贴分享链接或输入歌单 ID，无需选择平台；来源由链接或 V2 自动识别
-- 添加成功后，名称、封面、介绍、创建人和完整曲目固定写入浏览器 `localStorage`；再次打开直接使用快照，仅点击“更新歌单”时请求 V2 并覆盖缓存
+- 未登录可以浏览和搜索，但播放会打开设备密钥登录界面，音频接口本身也会返回 `401`，不会请求上游
+- 喜欢、最近播放和歌单完整快照写入当前账号的 `AUTH_DB` D1；再次打开直接使用快照，仅点击“更新歌单”时请求 V2 并覆盖缓存
+- 旧版 `localStorage` 音乐库仅在账号云端为空时自动迁移一次，退出后页面立即停止播放并清空个人数据
 - 桌面端右侧队列和逐字歌词面板可正常打开
 - 手机点击底部歌曲信息可展开完整 Now Playing 页面，并切换歌词与队列
 - `widget.css` / `widget.js` 的 hash URL 返回 `immutable` 缓存，支持 Brotli/Gzip
@@ -62,6 +64,7 @@ AUTH_REGISTRATION_RATE_MAX=10
 - `MUSIC_API_TOKEN env binding is required`：缺少代理侧 master token。
 - `PROXY_SIGNING_SECRET env binding is required`：缺少会话签名密钥；设置独立随机 secret 后重新部署。
 - `AuthUnavailable`：用户系统缺少 `AUTH_DB` D1 binding。
+- `AuthenticationRequired`：音频或个人音乐库请求没有有效 RMusic ID 会话；使用设备密钥登录后重试。
 - `ProxySessionRequired`：请求没有有效的本站短期会话；刷新 RMusic 页面会自动重新签发。
 - `429 rate limit exceeded`：提高 `RATE_MAX`，或检查页面是否发生请求循环。
 - Meting-API 返回 401：两个 worker 的 token 不一致。
