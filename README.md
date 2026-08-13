@@ -77,7 +77,7 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 
 ### 播放音质与错误边界
 
-播放器可以选择 `auto`、`lossless`、`high`、`standard` 或 `low`，代理会把选择原样传给 Meting V2，并透传实际音质、编码和码率响应头。曲目卡片会根据 V2 `playback` 显示试听、会员、最高可用音质或暂不可播状态。QQ 音乐等平台因会员、cookie 或地域限制返回 `403/404` 时，代理直接保留该状态且使用 `Cache-Control: no-store`；不会搜索或播放其他平台版本。
+播放器可以选择 `auto`、`lossless`、`high`、`standard` 或 `low`，代理会把选择原样传给 Meting V2，并透传实际音质、编码和码率响应头。为兼容手机与 Safari，代理还会流式检查首个音频块，纠正上游误标的 FLAC、MP3、AAC、MP4、Ogg、WebM 或 WAV 媒体类型，不会为此缓冲整首歌曲。曲目卡片会根据 V2 `playback` 显示试听、会员、最高可用音质或暂不可播状态。QQ 音乐等平台因会员、cookie 或地域限制返回 `403/404` 时，代理直接保留该状态且使用 `Cache-Control: no-store`；不会搜索或播放其他平台版本。
 
 首页通过单个 `/api/proxy/v2/discovery?view=compact` 请求获取推荐、榜单和新歌。结果会在浏览器缓存 10 分钟，服务端先使用 isolate 热缓存再使用 D1 持久缓存；点击首页“刷新”会发送 `refresh=true` 主动重建服务端缓存。代理会透传 `Server-Timing`，便于区分各音乐平台的实际耗时。
 

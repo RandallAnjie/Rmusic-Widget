@@ -274,21 +274,79 @@ function copyHeader (source, target, name) {
   if (value) target.set(name, value)
 }
 
-function mediaResponse (upstream, kind) {
-  if (kind === 'stream') {
-    const headers = new Headers()
-    for (const name of [
-      'content-type', 'content-length', 'content-range', 'accept-ranges',
-      'x-meting-quality', 'x-meting-quality-requested', 'x-meting-codec', 'x-meting-bitrate-kbps'
-    ]) {
-      copyHeader(upstream.headers, headers, name)
-    }
-    if (!headers.has('accept-ranges')) headers.set('accept-ranges', 'bytes')
-    if (!headers.has('content-type')) headers.set('content-type', 'audio/mpeg')
-    headers.set('cache-control', upstream.ok ? 'public, max-age=300' : 'no-store')
-    headers.set('x-rmusic-api-version', '2')
-    return new Response(upstream.body, { status: upstream.status, headers })
+function byteSignature (bytes, offset, signature) {
+  if (!(bytes instanceof Uint8Array) || bytes.length < offset + signature.length) return false
+  return signature.every((byte, index) => bytes[offset + index] === byte)
+}
+
+function detectAudioFormat (bytes) {
+  if (byteSignature(bytes, 0, [0x66, 0x4c, 0x61, 0x43])) return { contentType: 'audio/flac', codec: 'flac' }
+  if (byteSignature(bytes, 0, [0x4f, 0x67, 0x67, 0x53])) return { contentType: 'audio/ogg', codec: 'ogg' }
+  if (byteSignature(bytes, 0, [0x52, 0x49, 0x46, 0x46]) && byteSignature(bytes, 8, [0x57, 0x41, 0x56, 0x45])) {
+    return { contentType: 'audio/wav', codec: 'wav' }
   }
+  if (byteSignature(bytes, 0, [0x1a, 0x45, 0xdf, 0xa3])) return { contentType: 'audio/webm', codec: 'webm' }
+  if (byteSignature(bytes, 4, [0x66, 0x74, 0x79, 0x70])) return { contentType: 'audio/mp4', codec: 'm4a' }
+  if (byteSignature(bytes, 0, [0x49, 0x44, 0x33])) return { contentType: 'audio/mpeg', codec: 'mp3' }
+  if (bytes instanceof Uint8Array && bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xf0) === 0xf0) {
+    return (bytes[1] & 0x06) === 0
+      ? { contentType: 'audio/aac', codec: 'aac' }
+      : { contentType: 'audio/mpeg', codec: 'mp3' }
+  }
+  return null
+}
+
+function prependStreamChunk (reader, firstChunk, firstDone) {
+  let pending = true
+  return new ReadableStream({
+    async pull (controller) {
+      if (pending) {
+        pending = false
+        if (firstChunk?.byteLength) controller.enqueue(firstChunk)
+        if (firstDone) controller.close()
+        return
+      }
+      const next = await reader.read()
+      if (next.done) controller.close()
+      else controller.enqueue(next.value)
+    },
+    cancel (reason) {
+      return reader.cancel(reason)
+    }
+  })
+}
+
+async function streamResponse (upstream) {
+  const headers = new Headers()
+  for (const name of [
+    'content-type', 'content-length', 'content-range', 'accept-ranges',
+    'x-meting-quality', 'x-meting-quality-requested', 'x-meting-codec', 'x-meting-bitrate-kbps'
+  ]) {
+    copyHeader(upstream.headers, headers, name)
+  }
+
+  let body = upstream.body
+  const contentRange = headers.get('content-range') || ''
+  const startsAtBeginning = !contentRange || /^bytes\s+0-/i.test(contentRange)
+  if (upstream.ok && body && startsAtBeginning) {
+    const reader = body.getReader()
+    const first = await reader.read()
+    const detected = detectAudioFormat(first.value)
+    if (detected) {
+      headers.set('content-type', detected.contentType)
+      if (!headers.has('x-meting-codec')) headers.set('x-meting-codec', detected.codec)
+    }
+    body = prependStreamChunk(reader, first.value, first.done)
+  }
+
+  if (!headers.has('accept-ranges')) headers.set('accept-ranges', 'bytes')
+  if (!headers.has('content-type')) headers.set('content-type', 'audio/mpeg')
+  headers.set('cache-control', upstream.ok ? 'public, max-age=300' : 'no-store')
+  headers.set('x-rmusic-api-version', '2')
+  return new Response(body, { status: upstream.status, headers })
+}
+
+function mediaResponse (upstream, kind) {
   if (kind === 'lyrics') {
     const headers = new Headers({
       'content-type': upstream.headers.get('content-type') || 'text/plain; charset=utf-8',
@@ -316,7 +374,7 @@ async function proxyStream (request, config, source, id, searchParams) {
     params,
     { accept: '*/*' }
   )
-  return mediaResponse(upstream, 'stream')
+  return streamResponse(upstream)
 }
 
 async function discoverPlaylist (request, config, id, searchParams) {
