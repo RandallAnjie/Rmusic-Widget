@@ -12,6 +12,7 @@
   const $ = (id) => document.getElementById(id)
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector))
   const API = '/api/proxy/v2'
+  const PROXY_SESSION_ENDPOINT = '/api/proxy/session'
   const SEARCH_PLATFORM_IDS = ['aggregate', 'tencent', 'netease', 'kugou', 'soda', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']
   const SEARCH_REQUEST_TIMEOUT_MS = 12000
 
@@ -179,6 +180,9 @@
   let activeSearchControllers = []
   let collectionRequestId = 0
   let lyricsRequestId = 0
+  let proxySessionPromise = null
+  let proxySessionRefreshAt = 0
+  let proxySessionRefreshTimer = 0
 
   function readJson (key, fallback) {
     try {
@@ -352,9 +356,55 @@
     return parsed?.detail || parsed?.message || body.slice(0, 180) || ('请求失败 (' + status + ')')
   }
 
+  function scheduleProxySessionRefresh () {
+    clearTimeout(proxySessionRefreshTimer)
+    const delay = Math.max(30_000, proxySessionRefreshAt - Date.now())
+    proxySessionRefreshTimer = setTimeout(() => {
+      ensureProxySession(true).catch(() => {})
+    }, Math.min(delay, 2_147_000_000))
+  }
+
+  async function ensureProxySession (force = false) {
+    if (!force && proxySessionRefreshAt > Date.now()) return
+    if (proxySessionPromise) return proxySessionPromise
+    proxySessionPromise = (async () => {
+      const response = await fetch(PROXY_SESSION_ENDPOINT, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          accept: 'application/json',
+          'x-rmusic-client': 'widget-v2'
+        }
+      })
+      if (!response.ok) {
+        const body = await response.text().catch(() => '')
+        throw new Error(apiErrorMessage(response.status, body))
+      }
+      const session = await response.json()
+      proxySessionRefreshAt = Number(session.refreshAfter) || (Date.now() + 30 * 60_000)
+      scheduleProxySessionRefresh()
+    })()
+    try {
+      await proxySessionPromise
+    } finally {
+      proxySessionPromise = null
+    }
+  }
+
+  async function proxyFetch (input, init = {}, retry = true) {
+    await ensureProxySession()
+    let response = await fetch(input, { ...init, credentials: 'same-origin' })
+    if (response.status === 401 && retry) {
+      proxySessionRefreshAt = 0
+      await ensureProxySession(true)
+      response = await fetch(input, { ...init, credentials: 'same-origin' })
+    }
+    return response
+  }
+
   async function fetchV2 (path, params, signal) {
     const query = params ? new URLSearchParams(params).toString() : ''
-    const response = await fetch(API + path + (query ? '?' + query : ''), {
+    const response = await proxyFetch(API + path + (query ? '?' + query : ''), {
       headers: { accept: 'application/json' },
       signal
     })
@@ -1926,7 +1976,7 @@
     const urls = [track.lrcpword, track.lrc].filter(Boolean)
     for (const url of urls) {
       try {
-        const response = await fetch(url)
+        const response = await proxyFetch(url)
         if (!response.ok) continue
         const data = parseLrc(await response.text())
         if (requestId !== lyricsRequestId) return
@@ -2107,20 +2157,26 @@
 
   /* ---------- Boot ---------- */
 
-  function boot () {
+  async function boot () {
     const modes = readJson(STORAGE.modes, {})
     if (modes.shuffle === 'on') state.shuffle = 'on'
     if (['off', 'all', 'single'].includes(modes.loop)) state.repeat = modes.loop
 
     setGreeting()
     renderModes()
-    renderHome()
-    renderLibrary()
     renderQueue()
     updateTransportEnabled()
     updatePlayIcon()
     setupMediaSession()
     els.lrcList.innerHTML = '<li class="lyrics-placeholder">播放歌曲后，这里会显示同步歌词。</li>'
+
+    try {
+      await ensureProxySession()
+    } catch (error) {
+      toast('安全会话建立失败：' + error.message, 'error')
+    }
+    renderHome()
+    renderLibrary()
 
     const url = new URL(location.href)
     const type = url.searchParams.get('type')
@@ -2144,5 +2200,9 @@
     }
   }
 
-  boot()
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') ensureProxySession().catch(() => {})
+  })
+
+  boot().catch((error) => toast(error.message, 'error'))
 })()
