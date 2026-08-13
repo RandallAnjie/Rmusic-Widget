@@ -108,7 +108,7 @@
             <div class="hero-copy">
               <p class="eyebrow" id="greeting">欢迎回来</p>
               <h1>想听的，<br />现在就响起。</h1>
-              <p>一个搜索框连接多个音乐平台，按相关度给你最快、最顺手的播放队列。</p>
+              <p>一个搜索框连接多个音乐平台。登录 RMusic ID 后即可播放，并在所有设备同步你的音乐库。</p>
               <div class="hero-actions">
                 <button class="primary-button" type="button" data-nav="search">
                   <svg class="icon"><use href="#i-search"></use></svg>开始搜索
@@ -118,7 +118,7 @@
                 </button>
               </div>
               <div class="hero-features" aria-label="RMusic 功能">
-                <span><i></i>多平台聚合</span><span>逐字歌词</span><span>连续播放</span>
+                <span><i></i>多平台聚合</span><span>登录后播放</span><span>账号云端音乐库</span>
               </div>
             </div>
             <article class="home-now-card" id="home-now-card">
@@ -232,7 +232,7 @@
 
         <section class="view" id="view-library" data-view="library" hidden>
           <div class="page-heading library-heading">
-            <div><p class="eyebrow">只属于你</p><h1>你的音乐库</h1><p>喜欢、最近播放和保存的歌单都留在这台设备。</p></div>
+            <div><p class="eyebrow">只属于你</p><h1>你的音乐库</h1><p>喜欢、最近播放和歌单保存在 RMusic ID 中，并在登录设备间同步。</p></div>
             <button class="primary-button" id="libraryAddPlaylist" type="button"><svg class="icon"><use href="#i-plus"></use></svg>添加歌单</button>
           </div>
 
@@ -383,7 +383,7 @@
       <div class="modal-header"><div><p class="eyebrow">添加到音乐库</p><h2 id="playlist-modal-title">添加在线歌单</h2></div><button class="icon-button" id="closePlaylistModal" type="button" aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></div>
       <form id="playlist-form">
         <label><span>歌单链接或 ID</span><input id="playlist-id" required placeholder="粘贴分享链接，或输入 3778678" autocomplete="off" /></label>
-        <p class="form-note">无需选择平台。RMusic 会根据链接自动识别；只输入 ID 时由 V2 自动探测来源。名称、封面、介绍、创建人和完整曲目会直接保存到本机。</p>
+        <p class="form-note">无需选择平台。RMusic 会根据链接自动识别；只输入 ID 时由 V2 自动探测来源。名称、封面、介绍、创建人和完整曲目会直接保存到账号。</p>
         <div id="playlist-form-error" class="form-error" hidden></div>
         <button class="primary-button full-button" id="loadPlaylistButton" type="submit">识别并保存</button>
       </form>
@@ -409,7 +409,7 @@
         <label class="account-name-field"><span>称呼（可选）</span><input id="registrationDisplayName" maxlength="40" placeholder="例如：Randall" autocomplete="nickname" /></label>
         <button class="primary-button full-button" id="registerPasskey" type="button"><svg class="icon"><use href="#i-key"></use></svg>创建 RMusic 账号</button>
         <button class="secondary-button full-button" id="loginPasskey" type="button">已有账号 · 使用设备密钥登录</button>
-        <p class="account-privacy">不收集邮箱、手机号或密码。账号由一段随机用户标识与公开密钥组成。</p>
+        <p class="account-privacy">不收集邮箱、手机号或密码。登录后才可播放，收藏、歌单和播放记录会安全保存到账号。</p>
       </div>
 
       <div class="account-profile" id="accountProfile" hidden>

@@ -10,7 +10,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 点击歌曲的歌手或专辑可继续浏览歌手发行目录、代表作和完整专辑
 - 队列、随机播放、列表/单曲循环、进度和音量控制
 - 标准 LRC + Enhanced LRC 逐字歌词
-- 喜欢的歌曲、最近播放，以及带完整本机快照的已保存歌单
+- 登录后播放；喜欢的歌曲、最近播放和带完整快照的已保存歌单跨设备同步
 - 桌面端三栏布局；移动端单行播放器可展开为完整 Now Playing、歌词与队列页面
 - 页面、列表、弹层和播放状态统一使用 `cubic-bezier()` 动效曲线
 - 静态资源构建时压缩，并通过内容哈希、ETag 和 immutable 缓存降低重复加载
@@ -20,7 +20,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 无账号密码的 RMusic ID：使用 Face ID、Touch ID、Windows Hello 或设备 PIN 注册和登录
 - 设备密钥、登录会话和显示名称管理，并预留手机客户端 Bearer 会话能力
 
-所有收藏数据只保存在浏览器 `localStorage`。在线歌单会从分享链接识别平台；仅输入 ID 时由 Worker 自动探测。保存歌单时会把元信息和完整曲目写入本机快照，之后打开不再自动请求平台；需要最新内容时在歌单页点击“更新歌单”。
+播放需要先使用设备密钥登录 RMusic ID。喜欢的歌曲、最近播放和已保存歌单都按用户隔离保存在 `AUTH_DB` D1；在线歌单会从分享链接识别平台，仅输入 ID 时由 Worker 自动探测。保存歌单时会把元信息和完整曲目写入账号快照，之后打开不再自动请求平台；需要最新内容时在歌单页点击“更新歌单”。旧版本留在 `localStorage` 的音乐库会在账号云端为空时自动迁移一次，迁移成功后从本机移除。
 
 ## 安全模型
 
@@ -30,16 +30,19 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 2. 会话默认两小时有效，绑定本站域名和客户端 IP 网段；Widget 在有效期中点自动续签。签名无效、过期、跨域或复制到其他网络的请求在到达 Meting 前返回 `401/403`。
 3. `/api/proxy/v2` 不再开放通配 CORS，响应只允许浏览器私有缓存。其他网站无法用 fetch、图片或 audio 热链复用访客会话。
 4. Worker 验证会话后，才通过 `Authorization: Bearer` 在服务端注入 `MUSIC_API_TOKEN`，并把 V2 track 的资源链接重写回本站代理。
-5. 音频 Range、封面和歌词均通过代理返回；上游错误状态保持不变，不跨平台寻找备用音源。
-6. 限流同时按 IP 和签名会话计算，默认各 `180` 次/分钟；签发会话另有默认 `12` 次/分钟限制。
+5. 封面和歌词在代理会话建立后即可访问；音频流还必须存在有效 RMusic ID 会话，未登录返回 `401 AuthenticationRequired`，不会请求上游。
+6. 音频 Range 通过代理返回；上游错误状态保持不变，不跨平台寻找备用音源。
+7. 限流同时按 IP 和签名会话计算，默认各 `180` 次/分钟；签发会话另有默认 `12` 次/分钟限制。
 
-这套机制能阻止直接调用、跨站热链、Cookie 复制和大部分低成本滥用。由于网页本身是公开服务，任何不要求用户登录的方案都无法从密码学上区分“真实页面”和完整模拟浏览器的机器人；若需要抵御有意自动化，应在签发端点前再启用 RandallFlare/Cloudflare WAF 或 Turnstile。
+这套机制把浏览和播放权限分开：公开页面可以搜索和查看目录，但只有已登录用户可以获取音频；同时阻止直接调用、跨站热链、Cookie 复制和大部分低成本滥用。若需要进一步抵御有意自动化，可在注册、登录或代理会话签发端点前启用 RandallFlare/Cloudflare WAF 或 Turnstile。
 
 ### RMusic ID 与设备密钥
 
 用户系统完全不收集账号、密码、邮箱或手机号。注册时浏览器创建 WebAuthn 可发现凭据，私钥保留在设备安全硬件或系统密码管理器中；服务端 D1 只保存随机用户标识、公开密钥、签名计数器和设备名称。登录时不先输入用户名，由设备密钥返回不透明的 user handle，再由服务端校验 challenge、来源域名、RP ID、用户验证结果、签名和计数器。
 
 网页会话使用 `__Host-rmusic_user` 的 `HttpOnly + Secure + SameSite=Strict` 不透明 Cookie，D1 只保存 token 的 SHA-256；默认有效 30 天，可在账号中心查看并注销其他会话。所有修改操作都要求严格同源，挑战五分钟过期且只可消费一次，注册端点另有限流。手机客户端可在 WebAuthn 验证后请求 `Bearer rmu_…` 会话，但必须先通过 `AUTH_NATIVE_ORIGINS` 明确允许客户端来源；iOS Associated Domains 和 Android Digital Asset Links 需在确定 Bundle ID、Team ID、包名和签名证书后再配置。
+
+个人音乐库同样使用该会话鉴权。收藏和最近播放只保存播放器所需的精简歌曲字段；歌单保存元信息与完整曲目快照。所有查询和修改都带 `user_id` 条件，账号退出时页面立即停止播放并清空内存中的队列、当前歌曲和个人音乐库。每个账号最多保存 200 首收藏、30 条最近播放、60 个歌单；单个歌单最多 5000 首/4 MiB，歌单快照合计最多 24 MiB。
 
 站点同时暴露与 Meting 一致的 `/api/v2/*` REST 路径，方便以
 `music.bigrandall.io` 作为 API 域名。该路径不会注入服务端密钥，调用者仍必须在
@@ -62,7 +65,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | `GET /api/proxy/v2/artists/{source}/{id}/albums` | V2 歌手发行目录 |
 | `GET /api/proxy/v2/playlists/{source}/{id}` | V2 歌单详情、创建人、介绍、封面和分页曲目 |
 | `GET /api/proxy/v2/discovery` | 推荐、榜单和新歌首页数据 |
-| `GET /api/proxy/v2/streams/{source}/{id}` | V2 音频流代理，支持 `quality` |
+| `GET /api/proxy/v2/streams/{source}/{id}` | V2 音频流代理，支持 `quality`；必须登录 RMusic ID |
 | `GET /api/proxy/v2/streams/{source}/{id}/options` | 可用性、订阅要求和音质档位 |
 | `GET /api/proxy/v2/artworks/{source}/{id}` | V2 封面代理 |
 | `GET /api/proxy/v2/lyrics/{source}/{id}` | V2 歌词；`granularity=word` 为逐字歌词 |
@@ -75,6 +78,14 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | `GET /api/auth/sessions` | 当前账号的活跃网页/手机客户端会话 |
 | `DELETE /api/auth/sessions/{id}` | 注销指定会话 |
 | `PATCH /api/auth/profile` / `POST /api/auth/logout` | 修改显示名称 / 退出登录 |
+| `GET /api/auth/library` | 当前账号的收藏、最近播放和已保存歌单摘要 |
+| `PUT /api/auth/library/favorites` | 收藏歌曲；请求体为 `{ "track": Track }` |
+| `DELETE /api/auth/library/favorites/{source}/{id}` | 取消收藏 |
+| `POST /api/auth/library/recent` / `DELETE /api/auth/library/recent` | 写入一条播放记录 / 清空播放记录 |
+| `GET /api/auth/library/playlists/{source}/{id}` | 读取一个账号歌单完整快照 |
+| `PUT /api/auth/library/playlists/{source}/{id}` | 保存或更新歌单；请求体为 `{ "playlist": PlaylistSnapshot }` |
+| `DELETE /api/auth/library/playlists/{source}/{id}` | 移除已保存歌单 |
+| `POST /api/auth/library/import` | 仅当账号云端为空时，一次性迁移旧本机音乐库 |
 
 根路径支持轻量 deep link：
 
@@ -88,7 +99,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 搜索页默认选中“聚合”，通过 `/api/proxy/v2/tracks?query=…&source=all` 让 Meting V2 并发查询平台、容忍单源失败，按相关度统一排序并去除同一录音的重复结果。去重不会生成备用音源，也不会在播放失败时切换平台。
 
-平台栏可切换为 QQ 音乐、网易云、酷狗、汽水音乐、YouTube Music、酷我、百度、Apple Music 或 Spotify。单平台模式只请求所选平台，切换平台会用当前关键词立即重新搜索，选项保存在浏览器本地。也支持 `/?q=关键词&server=soda` 这类 deep link。导入歌单只需链接或 ID，无需选择平台：分享链接按域名识别，纯 ID 由 V2 自动探测来源；名称、封面、介绍、创建人和完整曲目会直接保存到浏览器本地。Spotify 当前需要应用所有者保持 Premium；汽水音乐需要服务端存在有效登录账号。
+平台栏可切换为 QQ 音乐、网易云、酷狗、汽水音乐、YouTube Music、酷我、百度、Apple Music 或 Spotify。单平台模式只请求所选平台，切换平台会用当前关键词立即重新搜索，选项保存在浏览器本地。也支持 `/?q=关键词&server=soda` 这类 deep link。导入歌单只需链接或 ID，无需选择平台：分享链接按域名识别，纯 ID 由 V2 自动探测来源；名称、封面、介绍、创建人和完整曲目会保存到当前 RMusic ID 的 D1 快照。Spotify 当前需要应用所有者保持 Premium；汽水音乐需要服务端存在有效登录账号。
 
 聚合模式传 `source=all&mode=fast&view=compact`，单平台模式传具体 `source` 和 `view=compact`。快速模式先显示首屏预算内完成的平台，若 `meta.complete=false`，页面会自动再次读取后台补全后的同一缓存；用户不需要重复搜索。相关度计算、ISRC 优先去重、平台状态和分页都以 V2 的 `meta` 为准，Widget 不再维护另一套聚合排序实现，最多请求 80 首。
 
@@ -134,7 +145,7 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 4. 绑定 `MUSIC_API` 到 Meting-API worker。
 5. 设置 `MUSIC_API_TOKEN`。
 6. 生成独立随机密钥并作为 secret 设置到 `PROXY_SIGNING_SECRET`；轮换此值会立即使旧代理会话失效。
-7. 创建专用 D1 数据库，并以 `AUTH_DB` 绑定到项目。认证表会在首次请求时幂等创建。
+7. 创建专用 D1 数据库，并以 `AUTH_DB` 绑定到项目。认证和个人音乐库表会在首次请求时幂等创建；也可依次执行 `migrations/0001_passkey_auth.sql`、`migrations/0002_account_library.sql`。
 
 项目未使用 Node 内置模块，不需要 `nodejs_compat`。
 
@@ -157,6 +168,7 @@ src/
 ├── rate-limit.js      per-IP 滑动窗口限流
 ├── proxy-session.js   HMAC 会话签发、校验、IP 绑定与私有缓存策略
 ├── auth.js            WebAuthn 注册/登录、设备密钥与用户会话管理
+├── library.js         D1 收藏、最近播放、歌单快照及配额隔离
 ├── api-proxy.js       token 注入、资源流转发与 JSON URL 重写
 └── widget/
     ├── index.html     完整应用结构
@@ -165,17 +177,8 @@ src/
 build.mjs              esbuild 打包与资源 hash
 ```
 
-## 浏览器数据
+## 数据保存位置
 
-音乐库的以下内容保存在当前域名的 `localStorage`，不会因为登录自动上传：
+当前域名的 `localStorage` 只保存非账号偏好：音量、随机/循环模式、搜索平台、播放音质和最多缓存 10 分钟的首页发现内容。喜欢的歌曲、最近播放、已保存歌单及完整歌单快照保存在 `AUTH_DB`，登录同一 RMusic ID 后可跨设备读取。
 
-- 音量、随机与循环模式
-- 最近播放（最多 30 首）
-- 喜欢的歌曲（最多 200 首）
-- 保存的在线歌单（最多 60 个）
-- 每个已保存歌单的元信息、完整曲目和缓存更新时间
-- 首页发现内容（10 分钟）和播放音质偏好
-
-歌单快照采用精简曲目结构以节省空间。浏览器的 `localStorage` 配额通常有限；空间不足时页面会保留歌单定义并提示缓存失败。更换域名或清除浏览器站点数据会清空这些本地收藏。
-
-RMusic ID 本身及其设备公开密钥、登录会话保存在 `AUTH_DB`。这为后续手机客户端和跨设备同步打下身份基础，但本版本不会擅自把本地收藏或播放历史同步到服务器。
+升级时，页面仅在 D1 音乐库完全为空的情况下读取旧版 `localStorage` 收藏、最近播放和歌单快照；导入成功后删除这些旧键，避免长期保存两份个人数据。账号退出或会话过期时，页面会停止音频并清空当前页面内存中的个人数据。

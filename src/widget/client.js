@@ -184,11 +184,13 @@ import {
     queueIndex: -1,
     queueLabel: '',
     currentTrack: null,
-    favorites: normalizeList(readJson(STORAGE.favorites, [])),
-    recent: normalizeList(readJson(STORAGE.recent, [])),
+    favorites: [],
+    recent: [],
     discovery: readDiscoverySnapshot(),
     discoveryLoading: false,
-    playlists: readJson(STORAGE.playlists, []),
+    playlists: [],
+    libraryUserId: null,
+    libraryLoading: false,
     shuffle: 'off',
     repeat: 'off',
     openPanel: null,
@@ -236,6 +238,10 @@ import {
     } catch {
       return false
     }
+  }
+
+  function removeStorage (key) {
+    try { localStorage.removeItem(key) } catch {}
   }
 
   function readStorage (key, fallback = '') {
@@ -463,6 +469,166 @@ import {
     return body
   }
 
+  function clearPersonalLibrary () {
+    const accountCollectionVisible = state.collection && savedPlaylistFor(state.collection)
+    state.favorites = []
+    state.recent = []
+    state.playlists = []
+    state.libraryUserId = null
+    if (accountCollectionVisible) {
+      state.collection = null
+      if (state.view === 'collection') showView('home')
+    }
+    renderHome()
+    renderLibrary()
+    syncFavoriteButtons()
+    syncCollectionSaveButton()
+  }
+
+  function clearArtwork (image, fallback) {
+    image.hidden = true
+    image.removeAttribute('src')
+    fallback.hidden = false
+    fallback.textContent = 'RM'
+  }
+
+  function resetNowPlaying () {
+    lyricsRequestId += 1
+    lrcData = []
+    lastLrcIndex = -1
+    els.nowTitle.textContent = '选择一首歌'
+    els.nowAuthor.textContent = '从搜索或歌单开始'
+    els.mobileNowTitle.textContent = '选择一首歌'
+    els.mobileNowAuthor.textContent = '从搜索或歌单开始'
+    els.lyricsTitle.textContent = '还没有播放歌曲'
+    els.lrcList.innerHTML = '<li class="lyrics-placeholder">播放歌曲后，这里会显示同步歌词。</li>'
+    els.lrcList.style.transform = ''
+    els.homeNowKicker.textContent = 'READY TO PLAY'
+    els.homeNowTitle.textContent = '下一首，由你决定'
+    els.homeNowAuthor.textContent = '搜索歌曲或载入一个歌单'
+    els.homeNowProgress.style.width = '0%'
+    els.homeNowCard.classList.remove('has-track', 'is-playing')
+    clearArtwork(els.nowCover, els.nowCoverFallback)
+    clearArtwork(els.mobileNowCover, els.mobileNowFallback)
+    clearArtwork(els.homeNowCover, els.homeNowFallback)
+    els.ambient.style.backgroundImage = ''
+    els.ambient.style.opacity = '.78'
+    els.mobileNowBackdrop.style.backgroundImage = ''
+    els.nowLike.disabled = true
+    els.mobileNowLike.disabled = true
+    els.currTime.textContent = '0:00'
+    els.duration.textContent = '0:00'
+    els.mobileCurrTime.textContent = '0:00'
+    els.mobileDuration.textContent = '0:00'
+    ;[els.progressBar, els.mobileProgressBar].forEach((bar) => {
+      bar.setAttribute('aria-valuenow', '0')
+      bar.setAttribute('aria-valuetext', '0:00 / 0:00')
+    })
+    setProgressVisual(0)
+    ;[els.progressBuffered, els.mobileProgressBuffered].forEach((buffered) => { buffered.style.width = '0%' })
+    els.player.classList.remove('is-playing', 'track-changed')
+    els.contextPanel.classList.remove('is-playing')
+    setMediaPlaybackState('none')
+    if ('mediaSession' in navigator) {
+      try { navigator.mediaSession.metadata = null } catch {}
+    }
+    updatePlayIcon()
+    syncFavoriteButtons()
+  }
+
+  function stopAccountPlayback () {
+    clearTimeout(pendingSkipTimer)
+    els.audio.pause()
+    els.audio.removeAttribute('src')
+    els.audio.load()
+    state.loadingAudio = false
+    state.consecutiveErrors = 0
+    state.queue = []
+    state.queueIndex = -1
+    state.currentTrack = null
+    state.queueLabel = '播放队列'
+    resetNowPlaying()
+    renderQueue()
+    updateTransportEnabled()
+  }
+
+  function legacyLibraryPayload () {
+    const favorites = normalizeList(readJson(STORAGE.favorites, []))
+    const recent = normalizeList(readJson(STORAGE.recent, []))
+    const definitions = readJson(STORAGE.playlists, [])
+    const playlists = Array.isArray(definitions)
+      ? definitions.slice(0, 60).map((playlist) => {
+          const cached = readJson(STORAGE.playlistCachePrefix + playlistKey(playlist), null)
+          return cached && Array.isArray(cached.tracks)
+            ? { ...playlist, ...cached }
+            : { ...playlist, tracks: [], cachedAt: playlist.cachedAt || Date.now() }
+        })
+      : []
+    return {
+      favorites: favorites.map(compactCachedTrack),
+      recent: recent.map(compactCachedTrack),
+      playlists,
+      hasData: favorites.length > 0 || recent.length > 0 || playlists.length > 0
+    }
+  }
+
+  function clearLegacyLibrary (payload) {
+    removeStorage(STORAGE.favorites)
+    removeStorage(STORAGE.recent)
+    removeStorage(STORAGE.playlists)
+    payload.playlists.forEach((playlist) => removeStorage(STORAGE.playlistCachePrefix + playlistKey(playlist)))
+  }
+
+  async function loadAccountLibrary (allowMigration = true) {
+    const userId = state.account.user?.id
+    if (!state.account.authenticated || !userId) {
+      clearPersonalLibrary()
+      return null
+    }
+    if (state.libraryLoading) return null
+    state.libraryLoading = true
+    try {
+      let library = await authFetch('/library')
+      if (allowMigration && library?.empty) {
+        const legacy = legacyLibraryPayload()
+        if (legacy.hasData) {
+          try {
+            const result = await authFetch('/library/import', {
+              method: 'POST',
+              body: { favorites: legacy.favorites, recent: legacy.recent, playlists: legacy.playlists }
+            })
+            if (result?.imported) {
+              clearLegacyLibrary(legacy)
+              toast(`已把本机音乐库迁移到账号 · ${result.counts.favorites} 首收藏 / ${result.counts.playlists} 个歌单`)
+              library = await authFetch('/library')
+            }
+          } catch (error) {
+            if (error.status !== 409) toast('本机音乐库迁移失败：' + error.message, 'error')
+          }
+        }
+      }
+      if (state.account.user?.id !== userId) return null
+      state.favorites = normalizeList(library?.favorites)
+      state.recent = normalizeList(library?.recent)
+      state.playlists = Array.isArray(library?.playlists) ? library.playlists : []
+      state.libraryUserId = userId
+      renderHome()
+      renderLibrary()
+      syncFavoriteButtons()
+      syncCollectionSaveButton()
+      return library
+    } finally {
+      state.libraryLoading = false
+    }
+  }
+
+  function requireAccount (purpose = '播放音乐') {
+    if (state.account.authenticated && state.account.user) return true
+    toast(purpose + '需要先登录 RMusic 账号')
+    openAccountModal().then(() => setAccountError('请使用设备密钥登录后继续。')).catch(() => {})
+    return false
+  }
+
   function accountInitials (name) {
     return initials(name || 'RM')
   }
@@ -623,6 +789,7 @@ import {
 
   function renderAccount () {
     updateAccountTrigger()
+    updateTransportEnabled()
     els.accountAnonymous.hidden = state.account.authenticated
     els.accountProfile.hidden = !state.account.authenticated
     if (!state.account.authenticated || !state.account.user) return
@@ -636,6 +803,7 @@ import {
   }
 
   async function refreshAccount (details = false) {
+    const wasAuthenticated = state.account.authenticated
     try {
       const status = await authFetch('/session')
       state.account.available = true
@@ -653,12 +821,20 @@ import {
         state.account.devices = []
         state.account.sessions = []
       }
+      if (state.account.authenticated && (state.libraryUserId !== state.account.user?.id || details)) {
+        await loadAccountLibrary(true)
+      } else if (!state.account.authenticated) {
+        if (wasAuthenticated) stopAccountPlayback()
+        clearPersonalLibrary()
+      }
       renderAccount()
       return status
     } catch (error) {
       if (error.status === 401) {
         state.account.authenticated = false
         state.account.user = null
+        if (wasAuthenticated) stopAccountPlayback()
+        clearPersonalLibrary()
         renderAccount()
         return null
       }
@@ -775,6 +951,8 @@ import {
       state.account.session = null
       state.account.devices = []
       state.account.sessions = []
+      stopAccountPlayback()
+      clearPersonalLibrary()
       renderAccount()
       toast('已退出 RMusic 账号')
     } catch (error) {
@@ -1251,9 +1429,12 @@ import {
     return state.favorites.some((item) => trackKey(item) === key)
   }
 
-  function toggleFavorite (track) {
+  async function toggleFavorite (track) {
+    if (!requireAccount('收藏歌曲')) return
     const key = trackKey(track)
     const index = state.favorites.findIndex((item) => trackKey(item) === key)
+    const previous = state.favorites.slice()
+    const removing = index >= 0
     if (index >= 0) {
       state.favorites.splice(index, 1)
       toast('已从喜欢的歌曲中移除')
@@ -1262,10 +1443,22 @@ import {
       state.favorites = state.favorites.slice(0, 200)
       toast('已添加到喜欢的歌曲')
     }
-    writeJson(STORAGE.favorites, state.favorites)
     renderHome()
     renderLibrary()
     syncFavoriteButtons()
+    try {
+      if (removing) {
+        await authFetch('/library/favorites/' + encodeURIComponent(track.server) + '/' + encodeURIComponent(track.id), { method: 'DELETE' })
+      } else {
+        await authFetch('/library/favorites', { method: 'PUT', body: { track: compactCachedTrack(track) } })
+      }
+    } catch (error) {
+      state.favorites = previous
+      renderHome()
+      renderLibrary()
+      syncFavoriteButtons()
+      toast('收藏同步失败：' + error.message, 'error')
+    }
   }
 
   function syncFavoriteButtons () {
@@ -1284,8 +1477,15 @@ import {
   function addRecent (track) {
     const key = trackKey(track)
     state.recent = [normalizeTrack(track, track.server), ...state.recent.filter((item) => trackKey(item) !== key)].slice(0, 30)
-    writeJson(STORAGE.recent, state.recent)
     renderHome()
+    renderLibrary()
+    authFetch('/library/recent', {
+      method: 'POST',
+      body: { track: compactCachedTrack(track) }
+    }).catch((error) => {
+      if (error.status === 401) refreshAccount(false).catch(() => {})
+      else toast('播放记录同步失败：' + error.message, 'error')
+    })
   }
 
   function renderHome () {
@@ -1305,21 +1505,26 @@ import {
 
   els.nowLike.addEventListener('click', () => { if (state.currentTrack) toggleFavorite(state.currentTrack) })
   els.mobileNowLike.addEventListener('click', () => { if (state.currentTrack) toggleFavorite(state.currentTrack) })
-  els.clearRecent.addEventListener('click', () => {
+  els.clearRecent.addEventListener('click', async () => {
+    if (!requireAccount('清空播放记录')) return
+    const previous = state.recent.slice()
     state.recent = []
-    writeJson(STORAGE.recent, state.recent)
     renderHome()
     renderLibrary()
-    toast('最近播放已清空')
+    try {
+      await authFetch('/library/recent', { method: 'DELETE' })
+      toast('最近播放已清空')
+    } catch (error) {
+      state.recent = previous
+      renderHome()
+      renderLibrary()
+      toast('清空失败：' + error.message, 'error')
+    }
   })
 
   /* ---------- Playlists ---------- */
 
   function playlistKey (playlist) { return (playlist.server || 'aggregate') + ':' + playlist.id }
-
-  function playlistCacheKey (playlist) {
-    return STORAGE.playlistCachePrefix + playlistKey(playlist)
-  }
 
   function compactCachedTrack (track) {
     const normalized = normalizeTrack(track)
@@ -1341,7 +1546,7 @@ import {
 
   function playlistSnapshot (playlist, cachedAt = Date.now()) {
     return {
-      version: 1,
+      version: 2,
       server: playlist.server || 'aggregate',
       id: String(playlist.id),
       name: playlist.name || ('歌单 ' + playlist.id),
@@ -1350,34 +1555,27 @@ import {
       creator: playlist.creator || null,
       stats: playlist.stats || null,
       tracks: Array.isArray(playlist.tracks) ? playlist.tracks.map(compactCachedTrack) : [],
-      cachedAt
+      cachedAt,
+      savedAt: playlist.savedAt || Date.now()
     }
   }
 
-  function readPlaylistCache (playlist) {
-    const snapshot = readJson(playlistCacheKey(playlist), null)
-    if (
-      !snapshot ||
-      snapshot.version !== 1 ||
-      String(snapshot.id) !== String(playlist.id) ||
-      !Array.isArray(snapshot.tracks)
-    ) return null
-    return {
-      ...playlist,
-      ...snapshot,
-      tracks: normalizeList(snapshot.tracks, snapshot.server || playlist.server),
-      fromCache: true
+  async function readPlaylistCache (playlist) {
+    if (!state.account.authenticated) return null
+    try {
+      const payload = await authFetch('/library/playlists/' + encodeURIComponent(playlist.server) + '/' + encodeURIComponent(playlist.id))
+      const snapshot = payload?.playlist
+      if (!snapshot || String(snapshot.id) !== String(playlist.id) || !Array.isArray(snapshot.tracks)) return null
+      return {
+        ...playlist,
+        ...snapshot,
+        tracks: normalizeList(snapshot.tracks, snapshot.server || playlist.server),
+        fromCache: true
+      }
+    } catch (error) {
+      if (error.status === 404) return null
+      throw error
     }
-  }
-
-  function writePlaylistCache (playlist, cachedAt) {
-    const snapshot = playlistSnapshot(playlist, cachedAt)
-    if (!writeJson(playlistCacheKey(snapshot), snapshot)) return null
-    return snapshot
-  }
-
-  function removePlaylistCache (playlist) {
-    try { localStorage.removeItem(playlistCacheKey(playlist)) } catch {}
   }
 
   function savedPlaylistFor (playlist) {
@@ -1421,6 +1619,7 @@ import {
   }
 
   function openPlaylistModal () {
+    if (!requireAccount('保存歌单')) return
     els.playlistModal.hidden = false
     els.playlistFormError.hidden = true
     setTimeout(() => els.playlistId.focus(), 40)
@@ -1453,12 +1652,11 @@ import {
       closePlaylistModal()
       const loaded = await loadPlaylist(playlist)
       if (loaded) {
-        const stored = savePlaylistDefinition(loaded)
-        if (!stored.saved) throw new Error('浏览器存储空间不足，无法保存歌单')
+        const stored = await savePlaylistDefinition(loaded)
         renderLibrary()
         syncCollectionSaveButton()
         renderCollectionHeader()
-        toast(stored.cached ? '歌单和完整曲目已缓存到本机' : '歌单已保存，但本机空间不足，曲目缓存失败', stored.cached ? undefined : 'error')
+        toast(stored.cached ? '歌单和完整曲目已保存到账号' : '歌单保存失败', stored.cached ? undefined : 'error')
       }
       els.playlistForm.reset()
     } catch (error) {
@@ -1471,10 +1669,15 @@ import {
     }
   })
 
-  function savePlaylistDefinition (playlist, previousPlaylist = null) {
-    const existing = savedPlaylistFor(previousPlaylist || playlist)
+  async function savePlaylistDefinition (playlist, previousPlaylist = null) {
+    if (!requireAccount('保存歌单')) return { saved: false, cached: false }
     const cachedAt = Date.now()
-    const value = {
+    const snapshot = playlistSnapshot({ ...playlist, savedAt: savedPlaylistFor(previousPlaylist || playlist)?.savedAt || Date.now() }, cachedAt)
+    const result = await authFetch(
+      '/library/playlists/' + encodeURIComponent(snapshot.server) + '/' + encodeURIComponent(snapshot.id),
+      { method: 'PUT', body: { playlist: snapshot } }
+    )
+    const value = result.playlist || {
       server: playlist.server,
       id: String(playlist.id),
       name: playlist.name || ('歌单 ' + playlist.id),
@@ -1483,41 +1686,39 @@ import {
       creator: playlist.creator || null,
       stats: playlist.stats || null,
       cachedAt,
-      savedAt: Date.now()
+      savedAt: Date.now(),
+      trackCount: snapshot.tracks.length
     }
     const replacedKeys = new Set([playlistKey(value)])
     if (previousPlaylist) replacedKeys.add(playlistKey(previousPlaylist))
     const candidates = [value, ...state.playlists.filter((item) => !replacedKeys.has(playlistKey(item)))]
-    const nextPlaylists = candidates.slice(0, 60)
-    if (!writeJson(STORAGE.playlists, nextPlaylists)) return { saved: false, cached: false }
-    state.playlists = nextPlaylists
-    const snapshot = writePlaylistCache(playlist, cachedAt)
-    if (!snapshot) {
-      value.cachedAt = existing?.cachedAt || null
-      state.playlists[0] = value
-      writeJson(STORAGE.playlists, state.playlists)
+    state.playlists = candidates.slice(0, 60)
+    if (previousPlaylist && playlistKey(previousPlaylist) !== playlistKey(value)) {
+      await authFetch('/library/playlists/' + encodeURIComponent(previousPlaylist.server) + '/' + encodeURIComponent(previousPlaylist.id), { method: 'DELETE' })
     }
-    if (previousPlaylist && playlistKey(previousPlaylist) !== playlistKey(value)) removePlaylistCache(previousPlaylist)
-    for (const removed of candidates.slice(60)) removePlaylistCache(removed)
     playlist.cachedAt = value.cachedAt
-    playlist.fromCache = !!snapshot
+    playlist.fromCache = true
     renderSavedPlaylists()
-    return { saved: true, cached: !!snapshot }
+    return { saved: true, cached: true }
   }
 
-  function removePlaylistDefinition (playlist) {
-    state.playlists = state.playlists.filter((item) => playlistKey(item) !== playlistKey(playlist))
-    writeJson(STORAGE.playlists, state.playlists)
-    removePlaylistCache(playlist)
-    if (state.collection && playlistKey(state.collection) === playlistKey(playlist)) {
-      state.collection.cachedAt = null
-      state.collection.fromCache = false
+  async function removePlaylistDefinition (playlist) {
+    if (!requireAccount('移除歌单')) return
+    try {
+      await authFetch('/library/playlists/' + encodeURIComponent(playlist.server) + '/' + encodeURIComponent(playlist.id), { method: 'DELETE' })
+      state.playlists = state.playlists.filter((item) => playlistKey(item) !== playlistKey(playlist))
+      if (state.collection && playlistKey(state.collection) === playlistKey(playlist)) {
+        state.collection.cachedAt = null
+        state.collection.fromCache = false
+      }
+      renderSavedPlaylists()
+      renderLibrary()
+      syncCollectionSaveButton()
+      renderCollectionHeader()
+      toast('歌单已从账号音乐库移除')
+    } catch (error) {
+      toast('移除歌单失败：' + error.message, 'error')
     }
-    renderSavedPlaylists()
-    renderLibrary()
-    syncCollectionSaveButton()
-    renderCollectionHeader()
-    toast('歌单已从音乐库移除')
   }
 
   function renderSavedPlaylists () {
@@ -1539,7 +1740,7 @@ import {
       side.type = 'button'
       side.className = 'sidebar-playlist'
       side.textContent = playlist.name
-      side.title = playlist.name + ' · ' + playlist.server + (playlist.cachedAt ? ' · 已缓存到本机' : '')
+      side.title = playlist.name + ' · ' + playlist.server + (playlist.cachedAt ? ' · 已保存到账号' : '')
       side.addEventListener('click', () => loadPlaylist(playlist).catch((error) => toast(error.message, 'error')))
       els.sidebarPlaylists.appendChild(side)
 
@@ -1564,9 +1765,9 @@ import {
       const name = document.createElement('strong')
       name.textContent = playlist.name
       const meta = document.createElement('span')
-      const cachedCount = playlist.cachedAt && playlist.stats?.trackCount
-        ? playlist.stats.trackCount + ' 首 · 本机缓存'
-        : (playlist.cachedAt ? '本机缓存' : '')
+      const cachedCount = playlist.cachedAt && (playlist.stats?.trackCount || playlist.trackCount)
+        ? (playlist.stats?.trackCount || playlist.trackCount) + ' 首 · 账号云端'
+        : (playlist.cachedAt ? '账号云端' : '')
       meta.textContent = [sourceName(playlist.server), playlist.creator?.name, cachedCount].filter(Boolean).join(' · ') || '在线歌单'
       copy.append(name, meta)
       const remove = document.createElement('button')
@@ -1747,7 +1948,7 @@ import {
   async function loadPlaylist (playlist) {
     const requestId = ++collectionRequestId
     const savedDefinition = savedPlaylistFor(playlist)
-    const cached = savedDefinition ? readPlaylistCache(savedDefinition) : null
+    const cached = savedDefinition ? await readPlaylistCache(savedDefinition) : null
     if (cached) {
       state.collection = cached
       showView('collection')
@@ -1767,7 +1968,7 @@ import {
       const result = await fetchPlaylistV2(playlist)
       if (requestId !== collectionRequestId) return false
       applyPlaylistResult(collection, result)
-      if (savedDefinition) savePlaylistDefinition(collection, savedDefinition)
+      if (savedDefinition) await savePlaylistDefinition(collection, savedDefinition)
       renderCollectionHeader()
       renderTrackRows(els.collectionTracks, collection.tracks, collection.name)
       if (!collection.tracks.length) toast('歌单没有返回曲目', 'error')
@@ -1808,7 +2009,7 @@ import {
         hour: '2-digit',
         minute: '2-digit'
       })
-      els.collectionCacheStatus.textContent = '· 本机缓存 · 更新于 ' + updated
+      els.collectionCacheStatus.textContent = '· 账号云端 · 更新于 ' + updated
       els.collectionCacheStatus.hidden = false
     } else {
       els.collectionCacheStatus.textContent = ''
@@ -1846,18 +2047,20 @@ import {
   els.playCollection.addEventListener('click', () => {
     if (state.collection?.tracks.length) playFromList(state.collection.tracks, 0, state.collection.name)
   })
-  els.saveCollection.addEventListener('click', () => {
+  els.saveCollection.addEventListener('click', async () => {
     if (!state.collection) return
     const saved = state.playlists.some((item) => playlistKey(item) === playlistKey(state.collection))
-    if (saved) removePlaylistDefinition(state.collection)
+    if (saved) await removePlaylistDefinition(state.collection)
     else {
-      const stored = savePlaylistDefinition(state.collection)
-      renderLibrary()
-      syncCollectionSaveButton()
-      renderCollectionHeader()
-      toast(!stored.saved
-        ? '浏览器存储空间不足，无法保存歌单'
-        : (stored.cached ? '歌单和完整曲目已缓存到本机' : '歌单已保存，但本机空间不足，曲目缓存失败'), stored.cached ? undefined : 'error')
+      try {
+        const stored = await savePlaylistDefinition(state.collection)
+        renderLibrary()
+        syncCollectionSaveButton()
+        renderCollectionHeader()
+        toast(stored.cached ? '歌单和完整曲目已保存到账号' : '歌单保存失败', stored.cached ? undefined : 'error')
+      } catch (error) {
+        toast('歌单保存失败：' + error.message, 'error')
+      }
     }
   })
 
@@ -1874,14 +2077,14 @@ import {
       if (requestId !== collectionRequestId) return
       const refreshed = applyPlaylistResult({ ...previous }, result)
       state.collection = refreshed
-      const stored = savePlaylistDefinition(refreshed, savedDefinition)
+      const stored = await savePlaylistDefinition(refreshed, savedDefinition)
       renderCollectionHeader()
       renderTrackRows(els.collectionTracks, refreshed.tracks, refreshed.name)
       toast(stored.cached
-        ? `歌单已更新并缓存 · ${refreshed.tracks.length} 首`
-        : '歌单已更新，但本机空间不足，未能覆盖缓存', stored.cached ? undefined : 'error')
+        ? `歌单已更新到账号 · ${refreshed.tracks.length} 首`
+        : '歌单已更新，但云端保存失败', stored.cached ? undefined : 'error')
     } catch (error) {
-      if (requestId === collectionRequestId) toast('更新失败，继续使用本机缓存：' + error.message, 'error')
+      if (requestId === collectionRequestId) toast('更新失败，继续使用账号中的版本：' + error.message, 'error')
     } finally {
       if (requestId === collectionRequestId) {
         els.refreshCollection.classList.remove('refreshing')
@@ -1895,6 +2098,7 @@ import {
 
   function playFromList (tracks, index, label) {
     if (!tracks.length || !tracks[index]) return
+    if (!requireAccount('播放音乐')) return
     state.queue = tracks.slice()
     state.queueIndex = index
     state.queueLabel = label || '播放队列'
@@ -1904,6 +2108,7 @@ import {
   function playQueueIndex (index) {
     const track = state.queue[index]
     if (!track) return
+    if (!requireAccount('播放音乐')) return
     clearTimeout(pendingSkipTimer)
     state.queueIndex = index
     state.currentTrack = track
@@ -1987,7 +2192,7 @@ import {
   }
 
   function updateTransportEnabled () {
-    const hasQueue = state.queue.length > 0
+    const hasQueue = state.queue.length > 0 && state.account.authenticated
     ;[els.prevBtn, els.nextBtn, els.playBtn, els.mobilePrevBtn, els.mobileNextBtn, els.mobilePlayBtn].forEach((button) => {
       button.disabled = !hasQueue
     })
@@ -2015,10 +2220,12 @@ import {
 
   function togglePlay () {
     if (!state.currentTrack) {
-      if (state.queue.length) playQueueIndex(Math.max(0, state.queueIndex))
-      else showView('search')
+      if (!state.queue.length) { showView('search'); return }
+      if (!requireAccount('播放音乐')) return
+      playQueueIndex(Math.max(0, state.queueIndex))
       return
     }
+    if (!requireAccount('播放音乐')) return
     if (els.audio.paused) els.audio.play().catch(() => {})
     else els.audio.pause()
   }
@@ -2379,7 +2586,7 @@ import {
   function setupMediaSession () {
     if (!('mediaSession' in navigator)) return
     const set = (name, handler) => { try { navigator.mediaSession.setActionHandler(name, handler) } catch {} }
-    set('play', () => els.audio.play().catch(() => {}))
+    set('play', () => { if (requireAccount('播放音乐')) els.audio.play().catch(() => {}) })
     set('pause', () => els.audio.pause())
     set('previoustrack', () => advance(-1))
     set('nexttrack', () => advance(1))
@@ -2604,7 +2811,7 @@ import {
     }
     renderHome()
     renderLibrary()
-    refreshAccount(false).catch(() => {
+    await refreshAccount(false).catch(() => {
       state.account.available = false
       renderAccount()
     })
@@ -2634,7 +2841,9 @@ import {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       ensureProxySession().catch(() => {})
-      refreshAccount(false).catch(() => {})
+      refreshAccount(false)
+        .then(() => { if (state.account.authenticated) return loadAccountLibrary(false) })
+        .catch(() => {})
     }
   })
 

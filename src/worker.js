@@ -20,7 +20,8 @@
 import { buildConfig } from './config.js'
 import { checkRate, clientIp } from './rate-limit.js'
 import { passThroughApiV2, proxyApiV2 } from './api-proxy.js'
-import { handleAuth } from './auth.js'
+import { handleAuth, resolveAuthenticatedUser } from './auth.js'
+import { handleLibrary } from './library.js'
 import {
   issueProxySession,
   privateProxyResponse,
@@ -128,6 +129,22 @@ function plain (status, body) {
   })
 }
 
+function playbackAuthRequired () {
+  return new Response(JSON.stringify({
+    type: 'about:blank',
+    title: 'AuthenticationRequired',
+    status: 401,
+    detail: '请先使用设备密钥登录后再播放音乐'
+  }), {
+    status: 401,
+    headers: {
+      'content-type': 'application/problem+json; charset=utf-8',
+      'cache-control': 'no-store',
+      'www-authenticate': 'Passkey realm="RMusic"'
+    }
+  })
+}
+
 function decodeAsset (key, base64) {
   if (decodedAssets.has(key)) return decodedAssets.get(key)
   const binary = atob(base64)
@@ -184,6 +201,9 @@ async function route (request, env, context) {
     if (url.pathname === '/api/auth/register/options' && request.method === 'POST') {
       const registrationDecision = checkRate(`auth-register:${ip}`, config.auth.registrationRate)
       if (!registrationDecision.allowed) return rateLimitResponse(registrationDecision)
+    }
+    if (url.pathname === '/api/auth/library' || url.pathname.startsWith('/api/auth/library/')) {
+      return handleLibrary(request, env)
     }
     return handleAuth(request, env, context)
   }
@@ -253,6 +273,11 @@ async function route (request, env, context) {
       }
       session = await verifyProxySession(request, config)
       if (!session) return proxyUnauthorized()
+      const streamMatch = url.pathname.match(/^\/api\/proxy\/v2\/streams\/[^/]+\/[^/]+\/?$/)
+      if (streamMatch) {
+        const account = await resolveAuthenticatedUser(request, env)
+        if (!account.userId) return playbackAuthRequired()
+      }
     }
 
     // Apply both per-IP and per-session limits before doing upstream work.

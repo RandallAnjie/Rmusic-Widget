@@ -260,6 +260,20 @@ async function requireSession (request, db) {
   return session
 }
 
+export async function resolveAuthenticatedUser (request, env) {
+  const config = authConfig(request, env)
+  if (!config.db) return { available: false, db: null, userId: null, session: null, origin: config.origin }
+  await ensureSchema(config.db)
+  const session = await currentSession(request, config.db)
+  return {
+    available: true,
+    db: config.db,
+    userId: session?.row?.user_id || null,
+    session: session?.row || null,
+    origin: config.origin
+  }
+}
+
 async function storeChallenge (db, challenge) {
   await db.prepare(`
     INSERT INTO rmusic_auth_challenges
