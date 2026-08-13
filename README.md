@@ -145,7 +145,7 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 4. 绑定 `MUSIC_API` 到 Meting-API worker。
 5. 设置 `MUSIC_API_TOKEN`。
 6. 生成独立随机密钥并作为 secret 设置到 `PROXY_SIGNING_SECRET`；轮换此值会立即使旧代理会话失效。
-7. 创建专用 D1 数据库，并以 `AUTH_DB` 绑定到项目。认证和个人音乐库表会在首次请求时幂等创建；也可依次执行 `migrations/0001_passkey_auth.sql`、`migrations/0002_account_library.sql`。
+7. 创建专用 D1 数据库，并以 `AUTH_DB` 绑定到项目。认证和个人音乐库表会在首次请求时幂等创建；也可依次执行 `migrations/0001_rmusic_auth.sql`、`migrations/0002_account_library.sql`。
 
 项目未使用 Node 内置模块，不需要 `nodejs_compat`。
 
