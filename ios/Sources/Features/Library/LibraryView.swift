@@ -28,7 +28,7 @@ struct LibraryView: View {
                 }
             }
             .padding(.top, 12)
-            .padding(.bottom, 120)
+            .padding(.bottom, 24)
         }
         .navigationTitle("音乐库")
         .refreshable {

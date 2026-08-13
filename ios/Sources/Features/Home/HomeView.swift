@@ -69,7 +69,7 @@ struct HomeView: View {
                 discoveryFooter
             }
             .padding(.vertical, 18)
-            .padding(.bottom, 120)
+            .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
         .navigationTitle("首页")

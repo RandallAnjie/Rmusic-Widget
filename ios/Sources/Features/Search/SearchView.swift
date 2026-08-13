@@ -19,7 +19,7 @@ struct SearchView: View {
                 content
             }
             .padding(.top, 8)
-            .padding(.bottom, 120)
+            .padding(.bottom, 24)
         }
         .scrollDismissesKeyboard(.interactively)
         .scrollIndicators(.hidden)
