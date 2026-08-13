@@ -99,6 +99,7 @@ function json (status, body, extraHeaders) {
   headers.set('content-type', 'application/json; charset=utf-8')
   headers.set('cache-control', 'no-store')
   headers.set('x-content-type-options', 'nosniff')
+  headers.set('vary', 'Cookie')
   return new Response(JSON.stringify(body), { status, headers })
 }
 
@@ -143,6 +144,15 @@ function requestToken (request) {
   const authorization = request.headers.get('authorization') || ''
   if (/^Bearer\s+rmu_/i.test(authorization)) return authorization.replace(/^Bearer\s+/i, '').trim()
   return cookieValue(request, USER_COOKIE)
+}
+
+function userCookie (token, expiresAt) {
+  const maxAge = Math.max(0, Math.floor((Number(expiresAt) - Date.now()) / 1000))
+  return `${USER_COOKIE}=${token}; Path=/; Expires=${new Date(Number(expiresAt)).toUTCString()}; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`
+}
+
+function clearUserCookie () {
+  return `${USER_COOKIE}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly; Secure; SameSite=Lax`
 }
 
 function normalizeDisplayName (value, fallback) {
@@ -529,16 +539,15 @@ async function createSessionResponse (request, config, user, verifiedOrigin, req
     ...(native ? { accessToken: token, tokenType: 'Bearer' } : {})
   }
   if (native) return json(200, body)
-  const maxAge = Math.floor(config.sessionTtlMs / 1000)
   return json(200, body, {
-    'set-cookie': `${USER_COOKIE}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict`
+    'set-cookie': userCookie(token, expiresAt)
   })
 }
 
 async function sessionStatus (request, config) {
   const session = await currentSession(request, config.db)
   if (!session) return json(200, { authenticated: false })
-  return json(200, {
+  const body = {
     authenticated: true,
     user: publicUser({
       id: session.row.user_id,
@@ -548,7 +557,12 @@ async function sessionStatus (request, config) {
       passkey_count: session.row.passkey_count
     }),
     session: { id: session.row.id, kind: session.row.kind, expiresAt: session.row.expires_at }
-  })
+  }
+  const cookieToken = cookieValue(request, USER_COOKIE)
+  const headers = session.row.kind === 'web' && cookieToken && cookieToken === session.token
+    ? { 'set-cookie': userCookie(session.token, session.row.expires_at) }
+    : undefined
+  return json(200, body, headers)
 }
 
 async function updateProfile (request, config) {
@@ -614,7 +628,7 @@ async function revokeSession (request, config, sessionId) {
   `).bind(now, sessionId, session.row.user_id).run()
   if (!Number(result?.meta?.changes || 0)) throw new AuthError(404, 'SessionNotFound', '登录会话不存在')
   const headers = sessionId === session.row.id
-    ? { 'set-cookie': `${USER_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict` }
+    ? { 'set-cookie': clearUserCookie() }
     : undefined
   return json(200, { revoked: true, current: sessionId === session.row.id }, headers)
 }
@@ -627,7 +641,7 @@ async function logout (request, config) {
       .bind(Date.now(), await sha256(token)).run()
   }
   return json(200, { authenticated: false }, {
-    'set-cookie': `${USER_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`
+    'set-cookie': clearUserCookie()
   })
 }
 

@@ -40,7 +40,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 用户系统完全不收集账号、密码、邮箱或手机号。注册时浏览器创建 WebAuthn 可发现凭据，私钥保留在设备安全硬件或系统密码管理器中；服务端 D1 只保存随机用户标识、公开密钥、签名计数器和设备名称。登录时不先输入用户名，由设备密钥返回不透明的 user handle，再由服务端校验 challenge、来源域名、RP ID、用户验证结果、签名和计数器。
 
-网页会话使用 `__Host-rmusic_user` 的 `HttpOnly + Secure + SameSite=Strict` 不透明 Cookie，D1 只保存 token 的 SHA-256；默认有效 30 天，可在账号中心查看并注销其他会话。所有修改操作都要求严格同源，挑战五分钟过期且只可消费一次，注册端点另有限流。手机客户端可在 WebAuthn 验证后请求 `Bearer rmu_…` 会话，但必须先通过 `AUTH_NATIVE_ORIGINS` 明确允许客户端来源；iOS Associated Domains 和 Android Digital Asset Links 需在确定 Bundle ID、Team ID、包名和签名证书后再配置。
+网页会话使用 `__Host-rmusic_user` 的 `HttpOnly + Secure + SameSite=Lax` 不透明持久 Cookie，同时写入 `Expires` 和 `Max-Age` 并在有效会话检查时重新确认属性；D1 只保存 token 的 SHA-256。会话默认有效 30 天，可在账号中心查看并注销其他会话。所有修改操作仍要求严格同源，因此 `Lax` 不会放宽资料或音乐库写入权限。挑战五分钟过期且只可消费一次，注册端点另有限流。手机客户端可在 WebAuthn 验证后请求 `Bearer rmu_…` 会话，但必须先通过 `AUTH_NATIVE_ORIGINS` 明确允许客户端来源；iOS Associated Domains 和 Android Digital Asset Links 需在确定 Bundle ID、Team ID、包名和签名证书后再配置。
 
 个人音乐库同样使用该会话鉴权。收藏和最近播放只保存播放器所需的精简歌曲字段；歌单保存元信息与完整曲目快照。所有查询和修改都带 `user_id` 条件，账号退出时页面立即停止播放并清空内存中的队列、当前歌曲和个人音乐库。每个账号最多保存 200 首收藏、30 条最近播放、60 个歌单；单个歌单最多 5000 首/4 MiB，歌单快照合计最多 24 MiB。
 
