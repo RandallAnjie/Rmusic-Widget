@@ -88,6 +88,9 @@ struct MiniPlayerView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        // Bottom chrome must stay compact so the system tab bar remains fully
+        // visible. The full player remains available for unrestricted text.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityElement(children: .contain)
     }
 }

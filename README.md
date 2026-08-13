@@ -52,8 +52,6 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 iOS target 需要 `webcredentials:music.bigrandall.io` Associated Domain。原生 `ASAuthorizationPlatformPublicKeyCredentialProvider` 使用 RP ID `music.bigrandall.io`，Apple 返回的 `clientDataJSON.origin` 为 `https://music.bigrandall.io`。部署时设置 `AUTH_ORIGIN=https://music.bigrandall.io`、`AUTH_RP_ID=music.bigrandall.io` 与 `AUTH_NATIVE_ORIGINS=https://music.bigrandall.io`。
 
-Debug 构建使用 `webcredentials:music.bigrandall.io?mode=developer` 直接读取源站 AASA，便于在 Apple CDN 尚未刷新时进行真机开发；测试设备需开启“设置 → 开发者 → Associated Domains Development”。Release 构建始终使用不带查询参数的标准 entitlement，不会把开发模式带入 App Store 产物。
-
 原生注册/登录仍使用 `/api/auth/*/options` 和 `/verify`，URLSession 请求带 `Origin: https://music.bigrandall.io` 与 `X-RMusic-Client: ios-v1`，在 verify JSON 中传 `"sessionMode":"bearer"`。Apple 原生 API 与网页都会签名同一 HTTPS origin；因此服务端除了校验 AASA 绑定后的 Passkey、origin 和客户端标识，还要求 Bearer verify 请求不含浏览器 `Sec-Fetch-Site` 头，避免同源网页 JavaScript 要求可导出会话。验证成功响应包含 `accessToken` 和 `tokenType: "Bearer"`；`accessToken` 应放在 Keychain，不写入 URL、日志或普通偏好。
 
 获得 Bearer 后有两种等价路径：

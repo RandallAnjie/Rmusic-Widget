@@ -21,7 +21,7 @@ struct AccountView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
-            .padding(.bottom, 120)
+            .padding(.bottom, 24)
         }
         .navigationTitle("账号")
         .refreshable {

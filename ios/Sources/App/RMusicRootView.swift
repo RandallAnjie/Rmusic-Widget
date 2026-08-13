@@ -41,36 +41,50 @@ struct RMusicRootView: View {
         }
     }
 
+    @ViewBuilder
     private var compactLayout: some View {
+        if #available(iOS 26.1, *) {
+            compactTabView
+                .tabViewBottomAccessory(isEnabled: model.playback.currentTrack != nil) {
+                    compactMiniPlayer
+                }
+        } else if #available(iOS 26.0, *) {
+            if model.playback.currentTrack != nil {
+                compactTabView
+                    .tabViewBottomAccessory {
+                        compactMiniPlayer
+                    }
+            } else {
+                compactTabView
+            }
+        } else {
+            compactTabView
+        }
+    }
+
+    private var compactTabView: some View {
         @Bindable var model = model
 
         return TabView(selection: $model.selectedTab) {
-            tabNavigation(HomeView())
+            compactTabNavigation(HomeView())
                 .tabItem { Label(RMusicTab.home.title, systemImage: model.selectedTab == .home ? RMusicTab.home.selectedSymbol : RMusicTab.home.symbol) }
                 .tag(RMusicTab.home)
 
-            tabNavigation(SearchView())
+            compactTabNavigation(SearchView())
                 .tabItem { Label(RMusicTab.search.title, systemImage: model.selectedTab == .search ? RMusicTab.search.selectedSymbol : RMusicTab.search.symbol) }
                 .tag(RMusicTab.search)
 
-            tabNavigation(LibraryView())
+            compactTabNavigation(LibraryView())
                 .tabItem { Label(RMusicTab.library.title, systemImage: model.selectedTab == .library ? RMusicTab.library.selectedSymbol : RMusicTab.library.symbol) }
                 .tag(RMusicTab.library)
 
-            tabNavigation(AccountView())
+            compactTabNavigation(AccountView())
                 .tabItem { Label(RMusicTab.account.title, systemImage: model.selectedTab == .account ? RMusicTab.account.selectedSymbol : RMusicTab.account.symbol) }
                 .tag(RMusicTab.account)
         }
         .tint(RMusicTheme.accent)
         .toolbarBackground(.ultraThinMaterial, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            MiniPlayerView {
-                model.isNowPlayingPresented = model.playback.currentTrack != nil
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 2)
-        }
     }
 
     private var regularLayout: some View {
@@ -106,16 +120,16 @@ struct RMusicRootView: View {
                     .listRowBackground(model.selectedTab == tab ? RMusicTheme.accent.opacity(0.12) : Color.clear)
                 }
                 .listStyle(.sidebar)
-
-                MiniPlayerView {
-                    model.isNowPlayingPresented = model.playback.currentTrack != nil
-                }
-                .padding(12)
             }
             .background(.ultraThinMaterial)
             .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 290)
         } detail: {
             tabNavigation(selectedView)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    compactMiniPlayer
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
+                }
         }
         .navigationSplitViewStyle(.balanced)
         .tint(RMusicTheme.accent)
@@ -139,6 +153,31 @@ struct RMusicRootView: View {
                 }
         }
         .tint(RMusicTheme.accent)
+    }
+
+    @ViewBuilder
+    private func compactTabNavigation<Content: View>(_ content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            tabNavigation(content)
+        } else {
+            tabNavigation(content)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    compactMiniPlayer
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var compactMiniPlayer: some View {
+        if model.playback.currentTrack != nil {
+            MiniPlayerView {
+                model.isNowPlayingPresented = true
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 2)
+            .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+            .accessibilitySortPriority(1)
+        }
     }
 }
 

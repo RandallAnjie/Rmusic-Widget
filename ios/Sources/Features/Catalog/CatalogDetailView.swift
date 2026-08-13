@@ -36,7 +36,7 @@ struct CatalogDetailView: View {
                 }
             }
             .padding(.vertical, 16)
-            .padding(.bottom, 120)
+            .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
         .navigationTitle(page?.kindTitle ?? "音乐目录")
