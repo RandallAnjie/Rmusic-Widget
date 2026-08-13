@@ -178,6 +178,17 @@ const env = {
         if (source === 'tencent') {
           return Response.json({ status: 403, detail: 'vkey empty', apiVersion: '2' }, { status: 403 })
         }
+        if (url.pathname.endsWith('/flac-audio')) {
+          const body = new TextEncoder().encode('fLaC-v2-audio')
+          return new Response(body, {
+            headers: {
+              'content-type': 'audio/mpeg; charset=UTF-8',
+              'content-length': String(body.byteLength),
+              'accept-ranges': 'bytes',
+              'x-meting-quality': 'auto'
+            }
+          })
+        }
         const range = new Headers(init.headers).get('range')
         return new Response('audio', {
           status: range ? 206 : 200,
@@ -400,6 +411,13 @@ assert.equal(audio.headers.get('x-meting-quality'), 'high')
 assert.equal(new Headers(calls.at(-1).init.headers).get('range'), 'bytes=0-4')
 assert.equal(calls.at(-1).url.searchParams.get('quality'), 'high')
 
+const flac = await request('/api/proxy/v2/streams/netease/flac-audio?quality=auto')
+assert.equal(flac.status, 200)
+assert.equal(flac.headers.get('content-type'), 'audio/flac')
+assert.equal(flac.headers.get('x-meting-codec'), 'flac')
+assert.equal(flac.headers.get('content-length'), String('fLaC-v2-audio'.length))
+assert.equal(await flac.text(), 'fLaC-v2-audio')
+
 const failedCallStart = calls.length
 const unavailable = await request('/api/proxy/v2/streams/tencent/blocked?quality=lossless')
 assert.equal(unavailable.status, 403)
@@ -408,4 +426,4 @@ assert.deepEqual(calls.slice(failedCallStart).map(({ url }) => url.pathname), ['
 assert.equal(calls.at(-1).url.searchParams.get('quality'), 'lossless')
 assert.equal(unavailable.headers.get('cache-control'), 'no-store')
 
-console.log('smoke: V2 discovery, catalog, cache refresh, quality and no alternate-source fallback passed')
+console.log('smoke: V2 discovery, catalog, cache refresh, audio formats and no alternate-source fallback passed')
