@@ -64,6 +64,18 @@ struct ArtistReference: Codable, Hashable, Sendable, Identifiable {
         id = container.flexibleString(for: "id")
         name = container.flexibleString(for: "name") ?? container.flexibleString(for: "title") ?? "未知艺人"
     }
+
+    /// QQ Music search/discovery sometimes exposes a legacy numeric singer ID,
+    /// while the V2 artist endpoint requires the canonical alphanumeric MID.
+    /// Treat that legacy form as non-navigable so the UI can fall back to a
+    /// useful name search instead of presenting a guaranteed 404.
+    func catalogID(for source: MusicSource) -> String? {
+        guard let id else { return nil }
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if source == .tencent, trimmed.allSatisfy(\.isNumber) { return nil }
+        return trimmed
+    }
 }
 
 struct AlbumReference: Codable, Hashable, Sendable {
