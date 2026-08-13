@@ -121,6 +121,10 @@ final class PlaybackController {
     @ObservationIgnored private var handledFailedItem: ObjectIdentifier?
     @ObservationIgnored private var needsReloadAfterFailure = false
     @ObservationIgnored private var playbackBecameContinuous = false
+    /// Only a track reached through natural queue progression may recover by
+    /// skipping another unavailable item. A user-selected track must remain
+    /// selected so its failure is visible and retryable.
+    @ObservationIgnored private var failureRecovery: FailureRecovery = .stop
     @ObservationIgnored private var wasPlayingBeforeInterruption = false
     @ObservationIgnored private var lastWidgetSnapshotTime: TimeInterval = -1
     @ObservationIgnored private var lastNowPlayingInfoTime: TimeInterval = -1
@@ -387,7 +391,8 @@ final class PlaybackController {
         autoPlay: Bool,
         resumeAt: TimeInterval?,
         reloadResources: Bool,
-        recordRecent: Bool
+        recordRecent: Bool,
+        failureRecovery: FailureRecovery = .stop
     ) {
         guard let index = queueIndex, queue.indices.contains(index) else { return }
         let track = queue[index]
@@ -395,6 +400,7 @@ final class PlaybackController {
         pendingAutoPlay = autoPlay
         pendingSeek = resumeAt
         shouldRecordRecent = recordRecent
+        self.failureRecovery = failureRecovery
         playbackBecameContinuous = false
         currentTime = resumeAt ?? 0
         duration = track.duration
@@ -721,7 +727,13 @@ final class PlaybackController {
             }
         }
         queueIndex = destination
-        loadCurrent(autoPlay: true, resumeAt: nil, reloadResources: true, recordRecent: true)
+        loadCurrent(
+            autoPlay: true,
+            resumeAt: nil,
+            reloadResources: true,
+            recordRecent: true,
+            failureRecovery: naturalEnd ? .advanceQueue : .stop
+        )
     }
 
     private func markStalled() {
@@ -778,6 +790,12 @@ final class PlaybackController {
         isPlaying = false
         isBuffering = false
 
+        guard failureRecovery == .advanceQueue else {
+            updateNowPlayingState()
+            saveWidgetSnapshot(reloadWidget: true)
+            return
+        }
+
         guard consecutiveFailures < 3 else {
             error = PlaybackError(
                 code: .consecutiveFailures,
@@ -809,8 +827,15 @@ final class PlaybackController {
             saveWidgetSnapshot(reloadWidget: true)
             return
         }
+        error = nil
         queueIndex = destination
-        loadCurrent(autoPlay: true, resumeAt: nil, reloadResources: true, recordRecent: true)
+        loadCurrent(
+            autoPlay: true,
+            resumeAt: nil,
+            reloadResources: true,
+            recordRecent: true,
+            failureRecovery: .advanceQueue
+        )
     }
 
     private func recordRecentIfNeeded() {
@@ -1057,4 +1082,9 @@ final class PlaybackController {
         static let repeatMode = "playback.repeatMode.v1"
         static let shuffle = "playback.shuffle.v1"
     }
+}
+
+private enum FailureRecovery {
+    case stop
+    case advanceQueue
 }

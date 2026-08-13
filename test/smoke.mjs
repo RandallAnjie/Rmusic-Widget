@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import { brotliDecompressSync } from 'node:zlib'
 import worker from '../dist/_worker.js'
 import { isNativeSessionRequest } from '../src/auth.js'
+import { followStreamRedirects } from '../src/api-proxy.js'
 import { FakeD1 } from './fake-d1.mjs'
 
 const calls = []
@@ -336,6 +337,7 @@ assert.match(clientSource, /els\.refreshCollection\.addEventListener\('click'/)
 assert.doesNotMatch(clientSource, /progressiveSearch|platformSearch|type=search|server=/)
 assert.doesNotMatch(proxySource, /\/api\?server=|type=url|type=search/)
 assert.doesNotMatch(proxySource, /resolveAudioFallback|AUDIO_FALLBACK_SOURCES|x-rmusic-fallback/i)
+assert.match(proxySource, /followStreamRedirects\(upstream, request\)/)
 assert.match(sourceHtml, /role="radiogroup" aria-label="选择搜索平台"/)
 for (const server of ['aggregate', 'tencent', 'netease', 'kugou', 'soda', 'ytmusic', 'kuwo', 'baidu', 'apple', 'spotify']) {
   assert.match(sourceHtml, new RegExp(`data-search-server="${server}"`), `search picker missing ${server}`)
@@ -922,6 +924,89 @@ assert.equal(flac.headers.get('content-type'), 'audio/flac')
 assert.equal(flac.headers.get('x-meting-codec'), 'flac')
 assert.equal(flac.headers.get('content-length'), String('fLaC-v2-audio'.length))
 assert.equal(await flac.text(), 'fLaC-v2-audio')
+
+const redirectCalls = []
+const redirectedAudio = await followStreamRedirects(
+  new Response(null, { status: 302, headers: { location: 'https://audio.example/preview.mp3' } }),
+  new Request('https://rmusic.test/audio', {
+    headers: {
+      authorization: 'Bearer must-not-leak',
+      cookie: 'must-not-leak=1',
+      range: 'bytes=0-4095'
+    }
+  }),
+  async (url, init) => {
+    redirectCalls.push({ url, init })
+    if (redirectCalls.length === 1) {
+      return new Response(null, { status: 307, headers: { location: 'https://media.example/final.mp3' } })
+    }
+    return new Response('redirected-audio', {
+      status: 206,
+      headers: { 'content-type': 'audio/mpeg', 'content-range': 'bytes 0-4095/8192' }
+    })
+  }
+)
+assert.equal(redirectedAudio.status, 206)
+assert.equal(await redirectedAudio.text(), 'redirected-audio')
+assert.equal(redirectedAudio.headers.get('content-range'), 'bytes 0-4095/8192')
+assert.equal(redirectCalls.length, 2)
+assert.equal(redirectCalls[0].url, 'https://audio.example/preview.mp3')
+assert.equal(redirectCalls[1].url, 'https://media.example/final.mp3')
+for (const call of redirectCalls) {
+  assert.equal(call.init.redirect, 'manual')
+  const redirectedHeaders = new Headers(call.init.headers)
+  assert.deepEqual([...redirectedHeaders.keys()].sort(), ['accept', 'range'])
+  assert.equal(redirectedHeaders.get('range'), 'bytes=0-4095')
+  assert.equal(redirectedHeaders.get('authorization'), null)
+  assert.equal(redirectedHeaders.get('cookie'), null)
+  assert.equal(redirectedHeaders.get('x-meting-token'), null)
+  assert.equal(redirectedHeaders.get('if-none-match'), null)
+}
+
+for (const location of [
+  'http://audio.example/preview.mp3',
+  'https://user:password@audio.example/preview.mp3',
+  'https://audio.example:8443/preview.mp3',
+  'https://localhost/preview.mp3',
+  'https://localhost./preview.mp3',
+  'https://127.0.0.1/preview.mp3',
+  'https://169.254.169.254/preview.mp3',
+  'https://service.internal/preview.mp3'
+]) {
+  const unsafeRedirect = await followStreamRedirects(
+    new Response(null, { status: 302, headers: { location } }),
+    new Request('https://rmusic.test/audio'),
+    async () => { throw new Error('unsafe redirect must not be fetched') }
+  )
+  assert.equal(unsafeRedirect.status, 502)
+  assert.equal(unsafeRedirect.headers.get('cache-control'), 'no-store')
+}
+
+const missingRedirect = await followStreamRedirects(
+  new Response(null, { status: 302 }),
+  new Request('https://rmusic.test/audio')
+)
+assert.equal(missingRedirect.status, 502)
+
+let redirectHop = 0
+const redirectLoop = await followStreamRedirects(
+  new Response(null, { status: 302, headers: { location: 'https://audio.example/0' } }),
+  new Request('https://rmusic.test/audio'),
+  async () => new Response(null, {
+    status: 302,
+    headers: { location: `https://audio.example/${++redirectHop}` }
+  })
+)
+assert.equal(redirectHop, 4)
+assert.equal(redirectLoop.status, 502)
+
+const failedRedirect = await followStreamRedirects(
+  new Response(null, { status: 302, headers: { location: 'https://audio.example/fail' } }),
+  new Request('https://rmusic.test/audio'),
+  async () => { throw new Error('private provider failure') }
+)
+assert.equal(failedRedirect.status, 502)
+assert.doesNotMatch(await failedRedirect.text(), /private provider failure/)
 
 const failedCallStart = calls.length
 const unavailable = await proxyRequest('/api/proxy/v2/streams/tencent/blocked?quality=lossless')

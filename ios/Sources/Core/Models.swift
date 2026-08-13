@@ -735,7 +735,10 @@ struct PlaylistSnapshot: Codable, Hashable, Sendable, Identifiable {
 struct APIEnvelope<Value: Decodable>: Decodable {
     let data: Value
     let meta: APIResponseMetadata?
-    let links: [String: String]?
+    // Pagination intentionally uses JSON null at either boundary. Keeping the
+    // values optional prevents an otherwise valid search response from making
+    // the entire envelope fail to decode.
+    let links: [String: String?]?
 }
 
 struct APIResponseMetadata: Codable, Hashable, Sendable {

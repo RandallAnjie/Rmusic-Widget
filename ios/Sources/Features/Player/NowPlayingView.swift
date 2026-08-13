@@ -93,6 +93,7 @@ struct NowPlayingView: View {
                 VStack(spacing: 22) {
                     currentArtwork(size: min(proxy.size.width * 0.66, 278))
                     metadata
+                    playbackErrorBanner
                     scrubber
                     controls
                     panelView
@@ -114,6 +115,7 @@ struct NowPlayingView: View {
                     currentArtwork(size: min(proxy.size.height * 0.50, 150))
                     VStack(spacing: 12) {
                         metadata
+                        playbackErrorBanner
                         scrubber
                         controls
                     }
@@ -196,6 +198,18 @@ struct NowPlayingView: View {
             .foregroundStyle(RMusicTheme.textSecondary)
         }
         .frame(maxWidth: 620)
+    }
+
+    @ViewBuilder
+    private var playbackErrorBanner: some View {
+        if let error = model.playback.error {
+            ErrorBanner(message: error.message) {
+                model.playback.play()
+                RMusicHaptics.impact(.medium)
+            }
+            .frame(maxWidth: 620)
+            .accessibilityLabel("播放失败：\(error.message)")
+        }
     }
 
     private var controls: some View {
