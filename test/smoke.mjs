@@ -152,15 +152,23 @@ const env = {
         const parts = url.pathname.split('/')
         const source = parts[4]
         if (source === 'aggregate') return Response.json({ status: 400 }, { status: 400 })
+        const autoDetect = parts[5] === 'auto-qq'
+        const detectedTrackCount = autoDetect && source !== 'tencent' ? 0 : 1
         return Response.json(envelope({
           id: parts[5],
           source,
-          name: 'Midnight Drive Collection',
+          name: autoDetect && source === 'tencent' ? 'Detected QQ Collection' : 'Midnight Drive Collection',
           cover: 'https://img.example/playlist.jpg',
           description: 'A city-pop playlist from the V2 resource.',
           creator: { id: 'creator-1', name: 'Randall', avatar: null, role: 'owner' },
-          stats: { trackCount: 1, playCount: 42, followerCount: 3 },
-          tracks: { items: [{ ...fixture, source, links: v2Track({ source }).links }], total: 1, offset: 0, limit: 100, hasMore: false }
+          stats: { trackCount: detectedTrackCount, playCount: 42, followerCount: 3 },
+          tracks: {
+            items: detectedTrackCount ? [{ ...fixture, source, links: v2Track({ source }).links }] : [],
+            total: detectedTrackCount,
+            offset: 0,
+            limit: 100,
+            hasMore: false
+          }
         }))
       }
       if (url.pathname.startsWith('/api/v2/artworks/')) {
@@ -247,7 +255,10 @@ assert.match(sourceCss, /\.mobile-now-stage/)
 assert.match(sourceCss, /\.home-now-card/)
 assert.doesNotMatch(sourceHtml, /id="server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
+assert.doesNotMatch(sourceHtml, /id="playlist-save"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-name"|显示名称/)
+assert.match(sourceHtml, /无需选择平台/)
+assert.match(sourceHtml, /完整曲目会直接保存到本机/)
 assert.match(clientSource, /const API = '\/api\/proxy\/v2'/)
 assert.match(clientSource, /async function searchV2/)
 assert.match(clientSource, /async function fetchPlaylistV2/)
@@ -260,6 +271,8 @@ assert.match(clientSource, /function migrateLegacyResourceUrl/)
 assert.match(clientSource, /playlistCachePrefix: 'rmusic_playlist_cache_v1:'/)
 assert.match(clientSource, /function readPlaylistCache/)
 assert.match(clientSource, /function writePlaylistCache/)
+assert.match(clientSource, /savePlaylistDefinition\(loaded\)/)
+assert.doesNotMatch(clientSource, /playlistSave|playlist-save|shouldSave/)
 assert.match(clientSource, /els\.refreshCollection\.addEventListener\('click'/)
 assert.doesNotMatch(clientSource, /progressiveSearch|platformSearch|type=search|server=/)
 assert.doesNotMatch(proxySource, /\/api\?server=|type=url|type=search/)
@@ -394,6 +407,17 @@ assert.equal(playlistData.creator.name, 'Randall')
 assert.match(playlistData.description, /V2 resource/)
 assert.equal(playlistData.cover, 'https://img.example/playlist.jpg')
 assert.equal(playlistData.tracks.items[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
+
+const autoPlaylistCallStart = calls.length
+const autoPlaylist = await request('/api/proxy/v2/playlists/aggregate/auto-qq?offset=0&limit=100')
+assert.equal(autoPlaylist.status, 200)
+const autoPlaylistData = (await autoPlaylist.json()).data
+assert.equal(autoPlaylistData.source, 'tencent')
+assert.equal(autoPlaylistData.name, 'Detected QQ Collection')
+assert.deepEqual(
+  calls.slice(autoPlaylistCallStart).map(({ url }) => url.pathname),
+  ['/api/v2/playlists/netease/auto-qq', '/api/v2/playlists/tencent/auto-qq']
+)
 
 const refreshedPlaylist = await request('/api/proxy/v2/playlists/netease/3778678?offset=0&limit=100&refresh=true')
 assert.equal(refreshedPlaylist.status, 200)
