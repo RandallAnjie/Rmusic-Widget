@@ -8,7 +8,7 @@
 4. 添加 service binding：`MUSIC_API` → Meting-API worker。
 5. 添加环境变量：`MUSIC_API_TOKEN`，值与 Meting-API 的 `METING_TOKEN` 一致。
 6. 添加 secret：`PROXY_SIGNING_SECRET`，使用独立的 32 字节以上随机值。
-7. 创建 D1 数据库并以 `AUTH_DB` 绑定到 Pages 项目，用于 RMusic ID、设备密钥和个人音乐库；执行 `migrations/0001_passkey_auth.sql` 与 `migrations/0002_account_library.sql`。
+7. 创建 D1 数据库并以 `AUTH_DB` 绑定到 Pages 项目，用于 RMusic ID、设备密钥和个人音乐库；执行 `migrations/0001_rmusic_auth.sql` 与 `migrations/0002_account_library.sql`。
 
 如果两个 worker 不在同一租户，可以不设置 `MUSIC_API`，改用：
 
