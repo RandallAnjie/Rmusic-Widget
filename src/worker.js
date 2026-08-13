@@ -4,10 +4,12 @@
 //   GET /                  → serves the widget shell
 //   GET /widget.css        → CSS (separate file = browser-cacheable)
 //   GET /widget.js         → client-side JS (same)
+//   GET /.well-known/apple-app-site-association
+//                          → iOS passkey webcredentials association
 //   GET /api/v2/…          → caller-authenticated Meting V2 passthrough
 //   GET /api/proxy/v2/…    → REST proxy for the Meting API V2,
 //                            injecting the master token server-side
-//                            after signed-session verification, then
+//                            after signed-session or native Bearer verification, then
 //                            rate-limiting per client IP and session.
 //
 // Why a worker at all (and not a static site that hits the Meting
@@ -20,7 +22,11 @@
 import { buildConfig } from './config.js'
 import { checkRate, clientIp } from './rate-limit.js'
 import { passThroughApiV2, proxyApiV2 } from './api-proxy.js'
-import { handleAuth, resolveAuthenticatedUser } from './auth.js'
+import {
+  handleAuth,
+  resolveAuthenticatedNativeSession,
+  resolveAuthenticatedUser
+} from './auth.js'
 import { handleLibrary } from './library.js'
 import {
   issueProxySession,
@@ -48,6 +54,12 @@ const COMPRESSED_ASSETS = {
   js: { br: __WIDGET_JS_BR__, gzip: __WIDGET_JS_GZIP__ }
 }
 const decodedAssets = new Map()
+const APPLE_APP_SITE_ASSOCIATION = JSON.stringify({
+  webcredentials: {
+    apps: ['N9B2H32Q94.io.bigrandall.rmusic']
+  }
+})
+const APPLE_APP_SITE_ASSOCIATION_ETAG = '"rmusic-aasa-v1"'
 
 const DIRECT_API_CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -76,6 +88,35 @@ function samePublicOrigin (request, originValue) {
   } catch {
     return false
   }
+}
+
+function appleAppSiteAssociationResponse (request) {
+  const headers = new Headers({
+    'content-type': 'application/json',
+    'cache-control': 'public, max-age=3600, s-maxage=86400',
+    etag: APPLE_APP_SITE_ASSOCIATION_ETAG,
+    'x-content-type-options': 'nosniff'
+  })
+  if (request.headers.get('if-none-match') === APPLE_APP_SITE_ASSOCIATION_ETAG) {
+    return new Response(null, { status: 304, headers })
+  }
+  return new Response(request.method === 'HEAD' ? null : APPLE_APP_SITE_ASSOCIATION, { headers })
+}
+
+function hasRMusicBearer (request) {
+  return /^Bearer\s+rmu_[A-Za-z0-9_-]+$/i.test(request.headers.get('authorization') || '')
+}
+
+async function resolveNativeBearerUser (request, env) {
+  if (!hasRMusicBearer(request)) return null
+  const origin = request.headers.get('origin')
+  const fetchSite = request.headers.get('sec-fetch-site')
+  // URLSession does not add browser Fetch Metadata or Origin headers. If
+  // either is present, retain the widget's same-origin browser boundary.
+  if (origin && !samePublicOrigin(request, origin)) return null
+  if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') return null
+  const account = await resolveAuthenticatedUser(request, env)
+  return account.userId && account.session?.kind === 'native' ? account : null
 }
 
 function withCors (request, response) {
@@ -194,6 +235,16 @@ async function route (request, env, context) {
 
   if (request.method === 'OPTIONS') return optionsResponse(request)
 
+  if (url.pathname === '/.well-known/apple-app-site-association') {
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return new Response('method not allowed\n', {
+        status: 405,
+        headers: { allow: 'GET, HEAD', 'content-type': 'text/plain; charset=utf-8' }
+      })
+    }
+    return appleAppSiteAssociationResponse(request)
+  }
+
   if (url.pathname === '/api/auth' || url.pathname.startsWith('/api/auth/')) {
     const ip = clientIp(request)
     const decision = checkRate(`auth:${ip}`, config.auth.rate)
@@ -215,8 +266,19 @@ async function route (request, env, context) {
     }
     const decision = checkRate(`proxy-session:${clientIp(request)}`, config.proxySession.issueRate)
     if (!decision.allowed) return rateLimitResponse(decision)
-    if (!trustedSessionBootstrap(request)) return proxyForbidden()
-    return issueProxySession(request, config)
+    const nativeClient = request.headers.get('x-rmusic-client') === 'ios-v1'
+    // Prefer an explicitly supplied native credential over the anonymous iOS
+    // bootstrap. The real app sends Origin on this request too; checking the
+    // trusted bootstrap first would silently discard the account binding and
+    // leave AVFoundation with an anonymous, playback-ineligible cookie.
+    if (nativeClient && request.headers.has('authorization')) {
+      const account = await resolveNativeBearerUser(request, env)
+      if (!account) return proxyUnauthorized()
+      return issueProxySession(request, config, account.session.id)
+    }
+    if (trustedSessionBootstrap(request)) return issueProxySession(request, config)
+    if (!nativeClient) return proxyForbidden()
+    return proxyUnauthorized()
   }
 
   if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -267,15 +329,21 @@ async function route (request, env, context) {
   const widgetApiV2 = url.pathname === '/api/proxy/v2' || url.pathname.startsWith('/api/proxy/v2/')
   if (directApiV2 || widgetApiV2) {
     let session = null
+    let nativeAccount = null
     if (widgetApiV2) {
       if (!config.proxySession.signingSecret) {
         return plain(500, 'rmusic-widget: PROXY_SIGNING_SECRET env binding is required.\n')
       }
       session = await verifyProxySession(request, config)
-      if (!session) return proxyUnauthorized()
+      if (!session) nativeAccount = await resolveNativeBearerUser(request, env)
+      if (!session && !nativeAccount) return proxyUnauthorized()
       const streamMatch = url.pathname.match(/^\/api\/proxy\/v2\/streams\/[^/]+\/[^/]+\/?$/)
       if (streamMatch) {
-        const account = await resolveAuthenticatedUser(request, env)
+        let account = nativeAccount
+        if (!account?.userId && session?.rsid) {
+          account = await resolveAuthenticatedNativeSession(request, env, session.rsid)
+        }
+        if (!account?.userId) account = await resolveAuthenticatedUser(request, env)
         if (!account.userId) return playbackAuthRequired()
       }
     }
@@ -286,7 +354,8 @@ async function route (request, env, context) {
     const ip = clientIp(request)
     const ipDecision = checkRate(`ip:${ip}`, config.rate)
     if (!ipDecision.allowed) return rateLimitResponse(ipDecision)
-    const sessionDecision = session ? checkRate(`session:${session.sid}`, config.rate) : null
+    const sessionIdentity = session?.sid || nativeAccount?.session?.id
+    const sessionDecision = sessionIdentity ? checkRate(`session:${sessionIdentity}`, config.rate) : null
     if (sessionDecision && !sessionDecision.allowed) return rateLimitResponse(sessionDecision)
     const remaining = sessionDecision
       ? Math.min(ipDecision.remaining, sessionDecision.remaining)

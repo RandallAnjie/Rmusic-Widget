@@ -18,7 +18,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 - 音源失败时保留当前平台的原始错误，不进行跨平台备用或替换
 - OS 锁屏 / 蓝牙耳机 / 系统媒体控件（Media Session）
 - 无账号密码的 RMusic ID：使用 Face ID、Touch ID、Windows Hello 或设备 PIN 注册和登录
-- 设备密钥、登录会话和显示名称管理，并预留手机客户端 Bearer 会话能力
+- 设备密钥、登录会话和显示名称管理；iOS 客户端可用 RMusic Bearer 安全访问同一代理与个人音乐库
 
 播放需要先使用设备密钥登录 RMusic ID。喜欢的歌曲、最近播放和已保存歌单都按用户隔离保存在 `AUTH_DB` D1；在线歌单会从分享链接识别平台，仅输入 ID 时由 Worker 自动探测。保存歌单时会把元信息和完整曲目写入账号快照，之后打开不再自动请求平台；需要最新内容时在歌单页点击“更新歌单”。旧版本留在 `localStorage` 的音乐库会在账号云端为空时自动迁移一次，迁移成功后从本机移除。
 
@@ -26,11 +26,11 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 前端只访问同源 `/api/proxy/v2`：
 
-1. 页面先向 `POST /api/proxy/session` 建立短期会话。Worker 用 `PROXY_SIGNING_SECRET` 生成 HMAC 签名，将会话放进 `HttpOnly + Secure + SameSite=Strict` Cookie；签名密钥和 `MUSIC_API_TOKEN` 都不会进入前端。
+1. 页面或 iOS App 先向 `POST /api/proxy/session` 建立短期会话。Worker 用 `PROXY_SIGNING_SECRET` 生成 HMAC 签名，将会话放进 `HttpOnly + Secure + SameSite=Strict` Cookie；签名密钥和 `MUSIC_API_TOKEN` 都不会进入客户端。iOS 未登录时可签发仅供浏览、搜索、封面和歌词使用的会话；登录后可用有效的原生 RMusic Bearer 签发账号绑定 Cookie，也可直接以该 Bearer 访问代理。
 2. 会话默认两小时有效，绑定本站域名和客户端 IP 网段；Widget 在有效期中点自动续签。签名无效、过期、跨域或复制到其他网络的请求在到达 Meting 前返回 `401/403`。
-3. `/api/proxy/v2` 不再开放通配 CORS，响应只允许浏览器私有缓存。其他网站无法用 fetch、图片或 audio 热链复用访客会话。
+3. `/api/proxy/v2` 不再开放通配 CORS，响应只允许私有缓存，并同时 `Vary: Cookie, Authorization`。其他网站无法用 fetch、图片或 audio 热链复用访客会话；携带浏览器跨站 Fetch Metadata / Origin 的 Bearer 请求也会被拒绝。
 4. Worker 验证会话后，才通过 `Authorization: Bearer` 在服务端注入 `MUSIC_API_TOKEN`，并把 V2 track 的资源链接重写回本站代理。
-5. 封面和歌词在代理会话建立后即可访问；音频流还必须存在有效 RMusic ID 会话，未登录返回 `401 AuthenticationRequired`，不会请求上游。
+5. 封面和歌词在代理会话建立后即可访问；音频流还必须存在有效 RMusic ID 会话，未登录返回 `401 AuthenticationRequired`，不会请求上游。原生签发的代理 Cookie 只保存受 HMAC 保护的数据库会话 ID，播放时仍会重新检查过期和注销状态，不保存 RMusic Bearer。
 6. 音频 Range 通过代理返回；上游错误状态保持不变，不跨平台寻找备用音源。
 7. 限流同时按 IP 和签名会话计算，默认各 `180` 次/分钟；签发会话另有默认 `12` 次/分钟限制。
 
@@ -40,7 +40,26 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 用户系统完全不收集账号、密码、邮箱或手机号。注册时浏览器创建 WebAuthn 可发现凭据，私钥保留在设备安全硬件或系统密码管理器中；服务端 D1 只保存随机用户标识、公开密钥、签名计数器和设备名称。登录时不先输入用户名，由设备密钥返回不透明的 user handle，再由服务端校验 challenge、来源域名、RP ID、用户验证结果、签名和计数器。
 
-网页会话使用 `__Host-rmusic_user` 的 `HttpOnly + Secure + SameSite=Lax` 不透明持久 Cookie，同时写入 `Expires` 和 `Max-Age` 并在有效会话检查时重新确认属性；D1 只保存 token 的 SHA-256。会话默认有效 30 天，可在账号中心查看并注销其他会话。所有修改操作仍要求严格同源，因此 `Lax` 不会放宽资料或音乐库写入权限。挑战五分钟过期且只可消费一次，注册端点另有限流。手机客户端可在 WebAuthn 验证后请求 `Bearer rmu_…` 会话，但必须先通过 `AUTH_NATIVE_ORIGINS` 明确允许客户端来源；iOS Associated Domains 和 Android Digital Asset Links 需在确定 Bundle ID、Team ID、包名和签名证书后再配置。
+网页会话使用 `__Host-rmusic_user` 的 `HttpOnly + Secure + SameSite=Lax` 不透明持久 Cookie，同时写入 `Expires` 和 `Max-Age` 并在有效会话检查时重新确认属性；D1 只保存 token 的 SHA-256。会话默认有效 30 天，可在账号中心查看并注销其他会话。所有网页修改操作仍要求严格同源，因此 `Lax` 不会放宽资料或音乐库写入权限。挑战五分钟过期且只可消费一次，注册端点另有限流。手机客户端可在 WebAuthn 验证后请求 `Bearer rmu_…` 会话；服务端只接受 `kind = native` 的有效 Bearer 作为原生账号和播放权限，并且必须先通过 `AUTH_NATIVE_ORIGINS` 明确允许验证来源。
+
+### iOS 原生接入
+
+已知原生 App ID 为 `N9B2H32Q94.io.bigrandall.rmusic`。Worker 在 `/.well-known/apple-app-site-association` 直接返回 `application/json`（不跳转）：
+
+```json
+{"webcredentials":{"apps":["N9B2H32Q94.io.bigrandall.rmusic"]}}
+```
+
+iOS target 需要 `webcredentials:music.bigrandall.io` Associated Domain。原生 `ASAuthorizationPlatformPublicKeyCredentialProvider` 使用 RP ID `music.bigrandall.io`，Apple 返回的 `clientDataJSON.origin` 为 `https://music.bigrandall.io`。部署时设置 `AUTH_ORIGIN=https://music.bigrandall.io`、`AUTH_RP_ID=music.bigrandall.io` 与 `AUTH_NATIVE_ORIGINS=https://music.bigrandall.io`。
+
+原生注册/登录仍使用 `/api/auth/*/options` 和 `/verify`，URLSession 请求带 `Origin: https://music.bigrandall.io` 与 `X-RMusic-Client: ios-v1`，在 verify JSON 中传 `"sessionMode":"bearer"`。Apple 原生 API 与网页都会签名同一 HTTPS origin；因此服务端除了校验 AASA 绑定后的 Passkey、origin 和客户端标识，还要求 Bearer verify 请求不含浏览器 `Sec-Fetch-Site` 头，避免同源网页 JavaScript 要求可导出会话。验证成功响应包含 `accessToken` 和 `tokenType: "Bearer"`；`accessToken` 应放在 Keychain，不写入 URL、日志或普通偏好。
+
+获得 Bearer 后有两种等价路径：
+
+- 每个 `/api/proxy/v2/*` 请求都发送 `Authorization: Bearer rmu_…`。Worker 验证 D1 会话后在上游改用 `MUSIC_API_TOKEN`，绝不向 Meting 透传 `rmu_…`。
+- `POST /api/proxy/session`，发送 `Authorization: Bearer rmu_…` 和 `X-RMusic-Client: ios-v1`。返回 `201`、`__Host-rmusic_proxy` Cookie 及 `{ authenticated, accountAuthenticated, expiresAt, refreshAfter }`；URLSession 可复用 Cookie 请求目录和音频。Cookie 按 IP 网段绑定，手机切换 Wi-Fi/蜂窝网络后可用 Keychain 中的 Bearer 重新签发，或直接继续使用 Bearer。
+
+Bearer 和 Cookie 都只是 RMusic Worker 的访问凭据；`MUSIC_API_TOKEN` 始终只存在 Worker 环境中。
 
 个人音乐库同样使用该会话鉴权。收藏和最近播放只保存播放器所需的精简歌曲字段；歌单保存元信息与完整曲目快照。所有查询和修改都带 `user_id` 条件，账号退出时页面立即停止播放并清空内存中的队列、当前歌曲和个人音乐库。每个账号最多保存 200 首收藏、30 条最近播放、60 个歌单；单个歌单最多 5000 首/4 MiB，歌单快照合计最多 24 MiB。
 
@@ -54,10 +73,11 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | Path | 用途 |
 |------|------|
 | `GET /` | RMusic 单页应用 |
+| `GET /.well-known/apple-app-site-association` | iOS Passkey `webcredentials` 关联，App ID `N9B2H32Q94.io.bigrandall.rmusic` |
 | `GET /widget.css` | 浏览器缓存的应用样式 |
 | `GET /widget.js` | 浏览器缓存的应用控制器 |
 | `GET /api/v2/*` | 严格 token 鉴权的同源 Meting V2 API |
-| `POST /api/proxy/session` | 同源 Widget 自动签发短期代理会话；不需要用户操作 |
+| `POST /api/proxy/session` | 同源 Widget / iOS 签发短期浏览会话，或由有效 iOS RMusic Bearer 签发账号绑定会话 |
 | `GET /api/proxy/v2/tracks?query=…&source=all` | V2 聚合或单平台搜索 |
 | `GET /api/proxy/v2/tracks/{source}?ids={id1},{id2}` | V2 批量歌曲元数据，最多 50 首 |
 | `GET /api/proxy/v2/albums/{source}/{id}` | V2 完整专辑元数据及分页曲目 |
@@ -130,7 +150,7 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 | `AUTH_SESSION_DAYS` | 否 | RMusic ID 会话有效天数，默认 `30`，范围 1–365 |
 | `AUTH_ORIGIN` | 否 | WebAuthn 预期网页来源；默认由当前请求的 HTTPS origin 推导 |
 | `AUTH_RP_ID` | 否 | WebAuthn RP ID；默认当前 hostname |
-| `AUTH_NATIVE_ORIGINS` | 否 | 允许签发手机客户端 Bearer 会话的 WebAuthn origins，逗号分隔 |
+| `AUTH_NATIVE_ORIGINS` | iOS 是 | 允许签发手机客户端 Bearer 会话的 WebAuthn origins，iOS 设为 `https://music.bigrandall.io`，多值用逗号分隔 |
 | `AUTH_RATE_MAX` | 否 | 单 IP 每分钟用户接口上限，默认 `60` |
 | `AUTH_REGISTRATION_RATE_MAX` | 否 | 单 IP 每小时创建账号请求上限，默认 `10` |
 | `LOG_LEVEL` | 否 | `trace` / `debug` / `info` / `warn` / `error` |
@@ -146,6 +166,7 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 5. 设置 `MUSIC_API_TOKEN`。
 6. 生成独立随机密钥并作为 secret 设置到 `PROXY_SIGNING_SECRET`；轮换此值会立即使旧代理会话失效。
 7. 创建专用 D1 数据库，并以 `AUTH_DB` 绑定到项目。认证和个人音乐库表会在首次请求时幂等创建；也可依次执行 `migrations/0001_rmusic_auth.sql`、`migrations/0002_account_library.sql`。
+8. 若启用 iOS，设置 `AUTH_ORIGIN=https://music.bigrandall.io`、`AUTH_RP_ID=music.bigrandall.io` 和 `AUTH_NATIVE_ORIGINS=https://music.bigrandall.io`；并在部署后直接检查 AASA URL 返回 `200 application/json`。
 
 项目未使用 Node 内置模块，不需要 `nodejs_compat`。
 

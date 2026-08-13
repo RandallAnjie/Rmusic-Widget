@@ -224,6 +224,13 @@ function rewriteData (value) {
     Object.entries(value).map(([key, item]) => [key, rewriteData(item)])
   )
   if (value.links) output.links = rewriteLinks(value.links)
+  // Album, artist and playlist payloads carry artwork outside track links.
+  // Those URLs may point at the authenticated upstream API, so expose them
+  // through the same-origin proxy just like track artwork.
+  if (value.artwork && typeof value.artwork === 'object' && typeof value.artwork.url === 'string') {
+    output.artwork = { ...output.artwork, url: rewriteApiLink(value.artwork.url) }
+  }
+  if (typeof value.cover === 'string') output.cover = rewriteApiLink(value.cover)
   return output
 }
 
