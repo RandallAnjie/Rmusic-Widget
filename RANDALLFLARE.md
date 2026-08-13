@@ -8,6 +8,7 @@
 4. 添加 service binding：`MUSIC_API` → Meting-API worker。
 5. 添加环境变量：`MUSIC_API_TOKEN`，值与 Meting-API 的 `METING_TOKEN` 一致。
 6. 添加 secret：`PROXY_SIGNING_SECRET`，使用独立的 32 字节以上随机值。
+7. 创建 D1 数据库并以 `AUTH_DB` 绑定到 Pages 项目，用于 RMusic ID 和设备密钥。
 
 如果两个 worker 不在同一租户，可以不设置 `MUSIC_API`，改用：
 
@@ -23,6 +24,9 @@ RATE_MAX=180
 PROXY_SESSION_TTL_SECONDS=7200
 PROXY_SESSION_RATE_WINDOW_MS=60000
 PROXY_SESSION_RATE_MAX=12
+AUTH_SESSION_DAYS=30
+AUTH_RATE_MAX=60
+AUTH_REGISTRATION_RATE_MAX=10
 ```
 
 ## 验证
@@ -42,6 +46,8 @@ PROXY_SESSION_RATE_MAX=12
 - 桌面端右侧队列和逐字歌词面板可正常打开
 - 手机点击底部歌曲信息可展开完整 Now Playing 页面，并切换歌词与队列
 - `widget.css` / `widget.js` 的 hash URL 返回 `immutable` 缓存，支持 Brotli/Gzip
+- 顶部或手机底部“账号”可直接使用 Face ID、Touch ID、Windows Hello 或设备 PIN 创建与登录 RMusic ID
+- 刷新页面后仍保持登录；账号中心可添加/移除设备密钥并注销其他会话
 
 也可以验证 deep link：
 
@@ -55,6 +61,7 @@ PROXY_SESSION_RATE_MAX=12
 - `neither MUSIC_API service binding nor MUSIC_API_URL is configured`：绑定或 URL 均未设置。
 - `MUSIC_API_TOKEN env binding is required`：缺少代理侧 master token。
 - `PROXY_SIGNING_SECRET env binding is required`：缺少会话签名密钥；设置独立随机 secret 后重新部署。
+- `AuthUnavailable`：用户系统缺少 `AUTH_DB` D1 binding。
 - `ProxySessionRequired`：请求没有有效的本站短期会话；刷新 RMusic 页面会自动重新签发。
 - `429 rate limit exceeded`：提高 `RATE_MAX`，或检查页面是否发生请求循环。
 - Meting-API 返回 401：两个 worker 的 token 不一致。

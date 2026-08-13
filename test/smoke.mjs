@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { brotliDecompressSync } from 'node:zlib'
 import worker from '../dist/_worker.js'
+import { FakeD1 } from './fake-d1.mjs'
 
 const calls = []
 
@@ -74,6 +75,7 @@ function searchResponse (url) {
 }
 
 const env = {
+  AUTH_DB: new FakeD1(),
   MUSIC_API_TOKEN: 'server-only-secret',
   PROXY_SIGNING_SECRET: 'independent-proxy-signing-secret',
   RATE_MAX: '1000',
@@ -238,7 +240,12 @@ assert.match(html, /id="discovery-recommendations"/)
 assert.match(html, /id="discovery-charts"/)
 assert.match(html, /id="discovery-new-releases"/)
 assert.match(html, /id="quality"/)
+assert.match(html, /id="account-modal"/)
+assert.match(html, /id="registerPasskey"/)
+assert.match(html, /id="loginPasskey"/)
 assert.doesNotMatch(html, /server-only-secret/)
+assert.match(home.headers.get('content-security-policy'), /frame-ancestors 'none'/)
+assert.match(home.headers.get('permissions-policy'), /publickey-credentials-create=\(self\)/)
 
 const sourceHtml = fs.readFileSync(new URL('../src/widget/index.html', import.meta.url), 'utf8')
 const clientSource = fs.readFileSync(new URL('../src/widget/client.js', import.meta.url), 'utf8')
@@ -257,7 +264,7 @@ assert.match(sourceCss, /\.home-now-card/)
 assert.doesNotMatch(sourceHtml, /id="server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-server"/)
 assert.doesNotMatch(sourceHtml, /id="playlist-save"/)
-assert.doesNotMatch(sourceHtml, /id="playlist-name"|显示名称/)
+assert.doesNotMatch(sourceHtml, /id="playlist-name"/)
 assert.match(sourceHtml, /无需选择平台/)
 assert.match(sourceHtml, /完整曲目会直接保存到本机/)
 assert.match(clientSource, /const API = '\/api\/proxy\/v2'/)
@@ -276,6 +283,8 @@ assert.match(clientSource, /function migrateLegacyResourceUrl/)
 assert.match(clientSource, /playlistCachePrefix: 'rmusic_playlist_cache_v1:'/)
 assert.match(clientSource, /function readPlaylistCache/)
 assert.match(clientSource, /function writePlaylistCache/)
+assert.match(clientSource, /startRegistration/)
+assert.match(clientSource, /startAuthentication/)
 assert.match(clientSource, /savePlaylistDefinition\(loaded\)/)
 assert.doesNotMatch(clientSource, /playlistSave|playlist-save|shouldSave/)
 assert.match(clientSource, /els\.refreshCollection\.addEventListener\('click'/)
@@ -311,6 +320,67 @@ assert.equal(freshCss.status, 304)
 const js = await request('/widget.js')
 assert.match(js.headers.get('content-type'), /javascript/)
 assert.match(await js.text(), /rmusic_favorites_v2/)
+
+const anonymousAccount = await request('/api/auth/session')
+assert.equal(anonymousAccount.status, 200)
+assert.deepEqual(await anonymousAccount.json(), { authenticated: false })
+
+const crossOriginRegistration = await request('/api/auth/register/options', {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    origin: 'https://attacker.example',
+    'sec-fetch-site': 'cross-site',
+    'cf-connecting-ip': '192.0.2.10'
+  },
+  body: '{}'
+})
+assert.equal(crossOriginRegistration.status, 403)
+
+function authMutation (path, body) {
+  return request(path, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      origin: 'https://rmusic.test',
+      'sec-fetch-site': 'same-origin',
+      'cf-connecting-ip': '192.0.2.20'
+    },
+    body: JSON.stringify(body)
+  })
+}
+
+const registrationOptions = await authMutation('/api/auth/register/options', { displayName: 'Smoke User' })
+assert.equal(registrationOptions.status, 200)
+const registration = await registrationOptions.json()
+assert.ok(registration.flowId)
+assert.equal(registration.options.rp.id, 'rmusic.test')
+assert.equal(registration.options.authenticatorSelection.residentKey, 'required')
+assert.equal(registration.options.authenticatorSelection.userVerification, 'required')
+assert.equal(registration.options.attestation, 'none')
+assert.ok(registration.options.user.id)
+assert.equal('password' in registration.options.user, false)
+
+const invalidRegistration = await authMutation('/api/auth/register/verify', {
+  flowId: registration.flowId,
+  response: {}
+})
+assert.equal(invalidRegistration.status, 400)
+assert.equal((await invalidRegistration.json()).title, 'PasskeyVerificationFailed')
+const replayedRegistration = await authMutation('/api/auth/register/verify', {
+  flowId: registration.flowId,
+  response: {}
+})
+assert.equal(replayedRegistration.status, 400)
+assert.equal((await replayedRegistration.json()).title, 'ChallengeExpired')
+
+const loginOptions = await authMutation('/api/auth/login/options', {})
+assert.equal(loginOptions.status, 200)
+const login = await loginOptions.json()
+assert.ok(login.flowId)
+assert.equal(login.options.rpId, 'rmusic.test')
+assert.equal(login.options.userVerification, 'required')
+assert.equal(login.options.allowCredentials, undefined)
 
 const directUnauthenticated = await request('/api/v2/sources')
 assert.equal(directUnauthenticated.status, 401)
