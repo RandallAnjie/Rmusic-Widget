@@ -7,7 +7,8 @@
 //   GET /api/v2/…          → caller-authenticated Meting V2 passthrough
 //   GET /api/proxy/v2/…    → REST proxy for the Meting API V2,
 //                            injecting the master token server-side
-//                            and rate-limiting per client IP.
+//                            after signed-session verification, then
+//                            rate-limiting per client IP and session.
 //
 // Why a worker at all (and not a static site that hits the Meting
 // API directly)? Two reasons:
@@ -19,6 +20,14 @@
 import { buildConfig } from './config.js'
 import { checkRate, clientIp } from './rate-limit.js'
 import { passThroughApiV2, proxyApiV2 } from './api-proxy.js'
+import {
+  issueProxySession,
+  privateProxyResponse,
+  proxyForbidden,
+  proxyUnauthorized,
+  trustedSessionBootstrap,
+  verifyProxySession
+} from './proxy-session.js'
 
 // Build-time string constants. build.mjs passes the contents of
 // src/widget/{index.html,index.css,client.js} through esbuild's
@@ -38,7 +47,7 @@ const COMPRESSED_ASSETS = {
 }
 const decodedAssets = new Map()
 
-const CORS_HEADERS = {
+const DIRECT_API_CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, HEAD, OPTIONS',
   'access-control-allow-headers': 'Content-Type, Authorization, X-Meting-Token, Range',
@@ -46,14 +55,69 @@ const CORS_HEADERS = {
   'access-control-max-age': '86400'
 }
 
-function withCors (response) {
+function isDirectApiPath (pathname) {
+  return pathname === '/api/v2' || pathname.startsWith('/api/v2/')
+}
+
+function isProxyPath (pathname) {
+  return pathname === '/api/proxy' || pathname.startsWith('/api/proxy/')
+}
+
+function samePublicOrigin (request, originValue) {
+  if (!originValue) return false
+  try {
+    const incoming = new URL(request.url)
+    const origin = new URL(originValue)
+    if (origin.host.toLowerCase() !== incoming.host.toLowerCase()) return false
+    if (origin.protocol === 'https:') return true
+    return origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)
+  } catch {
+    return false
+  }
+}
+
+function withCors (request, response) {
+  const url = new URL(request.url)
   const headers = new Headers(response.headers)
-  for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v)
+  if (isDirectApiPath(url.pathname)) {
+    for (const [key, value] of Object.entries(DIRECT_API_CORS_HEADERS)) headers.set(key, value)
+  } else if (isProxyPath(url.pathname)) {
+    // The token-injecting proxy is deliberately not a public CORS API.
+    // Same-origin requests do not need CORS, but reflecting the exact trusted
+    // origin keeps browser diagnostics clear without ever emitting `*`.
+    const origin = request.headers.get('origin')
+    if (samePublicOrigin(request, origin)) {
+      headers.set('access-control-allow-origin', origin)
+      headers.set('access-control-allow-credentials', 'true')
+      headers.append('vary', 'Origin')
+    }
+  }
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers
   })
+}
+
+function optionsResponse (request) {
+  const pathname = new URL(request.url).pathname
+  if (isDirectApiPath(pathname)) return new Response(null, { status: 204, headers: DIRECT_API_CORS_HEADERS })
+  if (isProxyPath(pathname)) {
+    const origin = request.headers.get('origin')
+    if (!samePublicOrigin(request, origin)) return new Response(null, { status: 204 })
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'access-control-allow-origin': origin,
+        'access-control-allow-credentials': 'true',
+        'access-control-allow-methods': 'GET, HEAD, POST, OPTIONS',
+        'access-control-allow-headers': 'Content-Type, Range, X-RMusic-Client',
+        'access-control-max-age': '600',
+        vary: 'Origin'
+      }
+    })
+  }
+  return new Response(null, { status: 204 })
 }
 
 function plain (status, body) {
@@ -100,15 +164,25 @@ function staticResponse (request, kind, value, contentType, cacheControl, etag) 
 }
 
 async function route (request, env) {
-  if (request.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: CORS_HEADERS })
+  const url = new URL(request.url)
+  const config = buildConfig(env)
+
+  if (request.method === 'OPTIONS') return optionsResponse(request)
+
+  if (url.pathname === '/api/proxy/session') {
+    if (request.method !== 'POST') return plain(405, 'method not allowed\n')
+    if (!config.proxySession.signingSecret) {
+      return plain(500, 'rmusic-widget: PROXY_SIGNING_SECRET env binding is required.\n')
+    }
+    const decision = checkRate(`proxy-session:${clientIp(request)}`, config.proxySession.issueRate)
+    if (!decision.allowed) return rateLimitResponse(decision)
+    if (!trustedSessionBootstrap(request)) return proxyForbidden()
+    return issueProxySession(request, config)
   }
+
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return plain(405, 'method not allowed\n')
   }
-
-  const url = new URL(request.url)
-  const config = buildConfig(env)
 
   if (url.pathname === '/' || url.pathname === '') {
     // HTML carries the source of truth for which asset hash is
@@ -150,25 +224,29 @@ async function route (request, env) {
     )
   }
 
-  const directApiV2 = url.pathname === '/api/v2' || url.pathname.startsWith('/api/v2/')
+  const directApiV2 = isDirectApiPath(url.pathname)
   const widgetApiV2 = url.pathname === '/api/proxy/v2' || url.pathname.startsWith('/api/proxy/v2/')
   if (directApiV2 || widgetApiV2) {
-    // Apply the per-IP rate limit before doing any upstream work.
+    let session = null
+    if (widgetApiV2) {
+      if (!config.proxySession.signingSecret) {
+        return plain(500, 'rmusic-widget: PROXY_SIGNING_SECRET env binding is required.\n')
+      }
+      session = await verifyProxySession(request, config)
+      if (!session) return proxyUnauthorized()
+    }
+
+    // Apply both per-IP and per-session limits before doing upstream work.
     // 429 is cheap; an upstream call to Meting-API + audio bytes is
     // expensive and counts against the operator's egress budget.
     const ip = clientIp(request)
-    const decision = checkRate(ip, config.rate)
-    if (!decision.allowed) {
-      return new Response('rate limit exceeded\n', {
-        status: 429,
-        headers: {
-          'content-type': 'text/plain; charset=utf-8',
-          'retry-after': String(Math.ceil(decision.retryAfterMs / 1000)),
-          'x-ratelimit-limit': String(decision.limit),
-          'x-ratelimit-remaining': '0'
-        }
-      })
-    }
+    const ipDecision = checkRate(`ip:${ip}`, config.rate)
+    if (!ipDecision.allowed) return rateLimitResponse(ipDecision)
+    const sessionDecision = session ? checkRate(`session:${session.sid}`, config.rate) : null
+    if (sessionDecision && !sessionDecision.allowed) return rateLimitResponse(sessionDecision)
+    const remaining = sessionDecision
+      ? Math.min(ipDecision.remaining, sessionDecision.remaining)
+      : ipDecision.remaining
 
     if (!config.musicApi.binding && !config.musicApi.url) {
       return plain(
@@ -192,14 +270,15 @@ async function route (request, env) {
     // request.url's protocol look like plain `http:` even on HTTPS
     // visitors (which used to be a mixed-content trap when the
     // rewritten audio src ended up `http://…`).
-    const response = directApiV2
+    let response = directApiV2
       ? await passThroughApiV2(request, config)
       : await proxyApiV2(request, config)
+    if (widgetApiV2) response = privateProxyResponse(response)
     // Stamp the rate-limit headers on success too, so a polite
     // client can pace itself rather than wait for a 429.
     const out = new Headers(response.headers)
-    out.set('x-ratelimit-limit', String(decision.limit))
-    out.set('x-ratelimit-remaining', String(decision.remaining))
+    out.set('x-ratelimit-limit', String(ipDecision.limit))
+    out.set('x-ratelimit-remaining', String(remaining))
     return new Response(response.body, {
       status: response.status,
       headers: out
@@ -209,15 +288,28 @@ async function route (request, env) {
   return plain(404, 'not found\n')
 }
 
+function rateLimitResponse (decision) {
+  return new Response('rate limit exceeded\n', {
+    status: 429,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+      'retry-after': String(Math.ceil(decision.retryAfterMs / 1000)),
+      'x-ratelimit-limit': String(decision.limit),
+      'x-ratelimit-remaining': '0'
+    }
+  })
+}
+
 export default {
   async fetch (request, env) {
     try {
       const response = await route(request, env)
-      return withCors(response)
+      return withCors(request, response)
     } catch (err) {
       const message = err && err.message ? err.message : String(err)
       try { console.error('[rmusic-widget] ' + message, err && err.stack) } catch {}
-      return withCors(plain(500, 'internal error: ' + message + '\n'))
+      return withCors(request, plain(500, 'internal error: ' + message + '\n'))
     }
   }
 }

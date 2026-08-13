@@ -7,6 +7,7 @@
 3. Output file：`dist/_worker.js`
 4. 添加 service binding：`MUSIC_API` → Meting-API worker。
 5. 添加环境变量：`MUSIC_API_TOKEN`，值与 Meting-API 的 `METING_TOKEN` 一致。
+6. 添加 secret：`PROXY_SIGNING_SECRET`，使用独立的 32 字节以上随机值。
 
 如果两个 worker 不在同一租户，可以不设置 `MUSIC_API`，改用：
 
@@ -19,6 +20,9 @@ MUSIC_API_URL=https://music.rapi.rest
 ```text
 RATE_WINDOW_MS=60000
 RATE_MAX=180
+PROXY_SESSION_TTL_SECONDS=7200
+PROXY_SESSION_RATE_WINDOW_MS=60000
+PROXY_SESSION_RATE_MAX=12
 ```
 
 ## 验证
@@ -30,6 +34,8 @@ RATE_MAX=180
 - 搜索会自动聚合各平台、按相关度排序，并可连续播放整个结果列表
 - 搜索页可切换到任一单独平台；切换后会用当前关键词立即重搜
 - 所有数据请求均走 `/api/proxy/v2`，上游只调用 Meting `/api/v2`
+- 页面会自动调用 `POST /api/proxy/session`，取得 HMAC 签名的 HttpOnly 短期会话；直接访问代理应返回 `401`
+- `/api/proxy/v2` 不返回 `Access-Control-Allow-Origin: *`，成功响应使用 `private` 缓存，并同时按 IP 与会话限流
 - `music.bigrandall.io/api/v2/*` 可作为完整 V2 API 使用；必须由调用者发送 token，服务端不会为该路径注入密钥
 - 通过“添加歌单”粘贴分享链接或输入歌单 ID，无需选择平台；来源由链接或 V2 自动识别
 - 添加成功后，名称、封面、介绍、创建人和完整曲目固定写入浏览器 `localStorage`；再次打开直接使用快照，仅点击“更新歌单”时请求 V2 并覆盖缓存
@@ -48,10 +54,12 @@ RATE_MAX=180
 
 - `neither MUSIC_API service binding nor MUSIC_API_URL is configured`：绑定或 URL 均未设置。
 - `MUSIC_API_TOKEN env binding is required`：缺少代理侧 master token。
+- `PROXY_SIGNING_SECRET env binding is required`：缺少会话签名密钥；设置独立随机 secret 后重新部署。
+- `ProxySessionRequired`：请求没有有效的本站短期会话；刷新 RMusic 页面会自动重新签发。
 - `429 rate limit exceeded`：提高 `RATE_MAX`，或检查页面是否发生请求循环。
 - Meting-API 返回 401：两个 worker 的 token 不一致。
 - 聚合搜索结果偏少：查看 `X-RMusic-Sources`，确认哪些平台本次成功响应；单个平台失败不会中断其他结果。
 - 封面或音频 404：对应平台可能没有该资源、歌曲下架或需要有效会员 cookie。
-- Tencent 返回 `vkey 全部 quality 都被拒`：通常是 QQ 音乐账号无对应权益、cookie 状态异常或 Worker 出口受地域限制。新版代理会严格匹配同曲后回退到网易云 / YouTube Music；响应头 `X-RMusic-Fallback` 表示实际采用的音源。仍返回 403 时应刷新 Tencent cookie、确认账号会员权益或调整 Meting-API 出口。
+- Tencent 返回 `vkey 全部 quality 都被拒`：通常是 QQ 音乐账号无对应权益、cookie 状态异常或 Worker 出口受地域限制。代理会保留原平台错误，不会切换到其他平台；应刷新 Tencent cookie、确认账号会员权益或调整 Meting-API 出口。
 
 浏览器看到的所有资源 URL 都应以本站 `/api/proxy/v2` 开头；如果 Network 面板出现带 Meting `auth` 的跨域 URL，说明 V2 links 重写逻辑出现回归。

@@ -28,6 +28,18 @@ export function buildConfig (env) {
       // at all).
       token: env.MUSIC_API_TOKEN || ''
     },
+    proxySession: {
+      // Dedicated HMAC key for the browser-only /api/proxy surface. Falling
+      // back to MUSIC_API_TOKEN keeps existing deployments working, but a
+      // separate random secret is recommended so either key can be rotated
+      // independently.
+      signingSecret: env.PROXY_SIGNING_SECRET || env.MUSIC_API_TOKEN || '',
+      ttlSeconds: boundedNumber(env.PROXY_SESSION_TTL_SECONDS, 7_200, 300, 86_400),
+      issueRate: {
+        windowMs: boundedNumber(env.PROXY_SESSION_RATE_WINDOW_MS, 60_000, 1_000, 3_600_000),
+        max: boundedNumber(env.PROXY_SESSION_RATE_MAX, 12, 1, 1_000)
+      }
+    },
     rate: {
       // The full-page app can load a visible grid of covers alongside
       // search, lyrics and audio requests. Keep the limit protective
@@ -44,6 +56,11 @@ export function buildConfig (env) {
 const toNumber = (v, d) => {
   const n = Number.parseInt(v, 10)
   return Number.isNaN(n) ? d : n
+}
+
+const boundedNumber = (value, fallback, minimum, maximum) => {
+  const number = toNumber(value, fallback)
+  return Math.max(minimum, Math.min(maximum, number))
 }
 
 const stripTrailingSlash = (s) => (s.endsWith('/') ? s.slice(0, -1) : s)

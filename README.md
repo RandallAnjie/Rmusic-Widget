@@ -24,11 +24,14 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 
 前端只访问同源 `/api/proxy/v2`：
 
-1. Worker 通过 `Authorization: Bearer` 在服务端注入 `MUSIC_API_TOKEN`；浏览器永远看不到 master token。
-2. Widget 只调用 Meting `/api/v2`，V2 track 的 `links.stream` / `artwork` / `lyrics` / `wordLyrics` 会重写成本站 REST 代理 URL。
-3. 音频 Range、封面和歌词均通过代理返回；上游错误状态保持不变，不跨平台寻找备用音源。
-4. 聚合与单平台搜索统一由 Meting V2 完成，前端直接消费相关度排序和去重后的 `{ data, meta, links }` 响应。
-5. 每 IP、每 isolate 有滑动窗口限流，默认 `180` 次/分钟。
+1. 页面先向 `POST /api/proxy/session` 建立短期会话。Worker 用 `PROXY_SIGNING_SECRET` 生成 HMAC 签名，将会话放进 `HttpOnly + Secure + SameSite=Strict` Cookie；签名密钥和 `MUSIC_API_TOKEN` 都不会进入前端。
+2. 会话默认两小时有效，绑定本站域名和客户端 IP 网段；Widget 在有效期中点自动续签。签名无效、过期、跨域或复制到其他网络的请求在到达 Meting 前返回 `401/403`。
+3. `/api/proxy/v2` 不再开放通配 CORS，响应只允许浏览器私有缓存。其他网站无法用 fetch、图片或 audio 热链复用访客会话。
+4. Worker 验证会话后，才通过 `Authorization: Bearer` 在服务端注入 `MUSIC_API_TOKEN`，并把 V2 track 的资源链接重写回本站代理。
+5. 音频 Range、封面和歌词均通过代理返回；上游错误状态保持不变，不跨平台寻找备用音源。
+6. 限流同时按 IP 和签名会话计算，默认各 `180` 次/分钟；签发会话另有默认 `12` 次/分钟限制。
+
+这套机制能阻止直接调用、跨站热链、Cookie 复制和大部分低成本滥用。由于网页本身是公开服务，任何不要求用户登录的方案都无法从密码学上区分“真实页面”和完整模拟浏览器的机器人；若需要抵御有意自动化，应在签发端点前再启用 RandallFlare/Cloudflare WAF 或 Turnstile。
 
 站点同时暴露与 Meting 一致的 `/api/v2/*` REST 路径，方便以
 `music.bigrandall.io` 作为 API 域名。该路径不会注入服务端密钥，调用者仍必须在
@@ -43,6 +46,7 @@ RMusic 是一个部署在 Cloudflare Workers / RandallFlare Workers 上的完整
 | `GET /widget.css` | 浏览器缓存的应用样式 |
 | `GET /widget.js` | 浏览器缓存的应用控制器 |
 | `GET /api/v2/*` | 严格 token 鉴权的同源 Meting V2 API |
+| `POST /api/proxy/session` | 同源 Widget 自动签发短期代理会话；不需要用户操作 |
 | `GET /api/proxy/v2/tracks?query=…&source=all` | V2 聚合或单平台搜索 |
 | `GET /api/proxy/v2/tracks/{source}?ids={id1},{id2}` | V2 批量歌曲元数据，最多 50 首 |
 | `GET /api/proxy/v2/albums/{source}/{id}` | V2 完整专辑元数据及分页曲目 |
@@ -88,8 +92,12 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 | `MUSIC_API` | 优先 | 指向 Meting-API worker 的 RandallFlare service binding |
 | `MUSIC_API_URL` | fallback | 未使用 service binding 时的公网地址，如 `https://music.rapi.rest` |
 | `MUSIC_API_TOKEN` | 是 | 与 Meting-API 的 `METING_TOKEN` 相同，仅由 Worker 使用 |
+| `PROXY_SIGNING_SECRET` | 推荐 | 至少 32 字节的随机代理会话 HMAC 密钥；未设置时兼容性回退到 `MUSIC_API_TOKEN` |
+| `PROXY_SESSION_TTL_SECONDS` | 否 | 代理会话有效期，默认 `7200`，范围 300–86400 秒 |
+| `PROXY_SESSION_RATE_WINDOW_MS` | 否 | 会话签发限流窗口，默认 `60000` |
+| `PROXY_SESSION_RATE_MAX` | 否 | 单 IP 每窗口最多签发次数，默认 `12` |
 | `RATE_WINDOW_MS` | 否 | 限流窗口，默认 `60000` |
-| `RATE_MAX` | 否 | 每个窗口的单 IP 请求上限，默认 `180` |
+| `RATE_MAX` | 否 | 每个窗口的单 IP、单会话请求上限，默认 `180` |
 | `LOG_LEVEL` | 否 | `trace` / `debug` / `info` / `warn` / `error` |
 
 `MUSIC_API` 与 `MUSIC_API_URL` 至少设置一个；两者同时存在时优先走 service binding。
@@ -101,6 +109,7 @@ V2 返回歌手/专辑资源 ID 时，结果列表中的歌手和专辑会成为
 3. Output file：`dist/_worker.js`
 4. 绑定 `MUSIC_API` 到 Meting-API worker。
 5. 设置 `MUSIC_API_TOKEN`。
+6. 生成独立随机密钥并作为 secret 设置到 `PROXY_SIGNING_SECRET`；轮换此值会立即使旧代理会话失效。
 
 项目未使用 Node 内置模块，不需要 `nodejs_compat`。
 
@@ -121,6 +130,7 @@ src/
 ├── worker.js          Worker 入口、静态资源路由、CORS 与错误处理
 ├── config.js          环境变量与 service binding 配置
 ├── rate-limit.js      per-IP 滑动窗口限流
+├── proxy-session.js   HMAC 会话签发、校验、IP 绑定与私有缓存策略
 ├── api-proxy.js       token 注入、资源流转发与 JSON URL 重写
 └── widget/
     ├── index.html     完整应用结构

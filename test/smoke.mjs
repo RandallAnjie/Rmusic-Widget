@@ -75,6 +75,7 @@ function searchResponse (url) {
 
 const env = {
   MUSIC_API_TOKEN: 'server-only-secret',
+  PROXY_SIGNING_SECRET: 'independent-proxy-signing-secret',
   RATE_MAX: '1000',
   MUSIC_API: {
     async fetch (input, init) {
@@ -260,6 +261,10 @@ assert.doesNotMatch(sourceHtml, /id="playlist-name"|显示名称/)
 assert.match(sourceHtml, /无需选择平台/)
 assert.match(sourceHtml, /完整曲目会直接保存到本机/)
 assert.match(clientSource, /const API = '\/api\/proxy\/v2'/)
+assert.match(clientSource, /const PROXY_SESSION_ENDPOINT = '\/api\/proxy\/session'/)
+assert.match(clientSource, /async function ensureProxySession/)
+assert.match(clientSource, /'x-rmusic-client': 'widget-v2'/)
+assert.match(clientSource, /credentials: 'same-origin'/)
 assert.match(clientSource, /async function searchV2/)
 assert.match(clientSource, /async function fetchPlaylistV2/)
 assert.match(clientSource, /async function loadDiscovery/)
@@ -309,6 +314,7 @@ assert.match(await js.text(), /rmusic_favorites_v2/)
 
 const directUnauthenticated = await request('/api/v2/sources')
 assert.equal(directUnauthenticated.status, 401)
+assert.equal(directUnauthenticated.headers.get('access-control-allow-origin'), '*')
 assert.match(directUnauthenticated.headers.get('www-authenticate'), /^Bearer/)
 assert.equal((await directUnauthenticated.json()).apiVersion, '2')
 assert.equal(new Headers(calls.at(-1).init.headers).has('authorization'), false)
@@ -330,9 +336,80 @@ const directQueryToken = await request('/api/v2?token=server-only-secret')
 assert.equal(directQueryToken.status, 200)
 assert.equal(calls.at(-1).url.searchParams.get('token'), 'server-only-secret')
 
-const search = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=netease')
+const unauthenticatedProxyCallStart = calls.length
+const unauthenticatedProxy = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=netease')
+assert.equal(unauthenticatedProxy.status, 401)
+assert.match(unauthenticatedProxy.headers.get('www-authenticate'), /^RMusicSession/)
+assert.equal(unauthenticatedProxy.headers.get('cache-control'), 'no-store')
+assert.equal(unauthenticatedProxy.headers.get('access-control-allow-origin'), null)
+assert.equal(calls.length, unauthenticatedProxyCallStart, 'unauthenticated proxy requests must not reach Meting')
+
+const crossOriginSession = await request('/api/proxy/session', {
+  method: 'POST',
+  headers: {
+    origin: 'https://attacker.example',
+    'sec-fetch-site': 'cross-site',
+    'x-rmusic-client': 'widget-v2'
+  }
+})
+assert.equal(crossOriginSession.status, 403)
+assert.equal(crossOriginSession.headers.get('set-cookie'), null)
+assert.equal(crossOriginSession.headers.get('access-control-allow-origin'), null)
+
+const sessionResponse = await request('/api/proxy/session', {
+  method: 'POST',
+  headers: {
+    origin: 'https://rmusic.test',
+    'cf-connecting-ip': '203.0.113.42',
+    'sec-fetch-site': 'same-origin',
+    'x-rmusic-client': 'widget-v2'
+  }
+})
+assert.equal(sessionResponse.status, 201)
+assert.equal(sessionResponse.headers.get('cache-control'), 'no-store')
+assert.equal(sessionResponse.headers.get('access-control-allow-origin'), 'https://rmusic.test')
+assert.equal(sessionResponse.headers.get('access-control-allow-credentials'), 'true')
+const setCookie = sessionResponse.headers.get('set-cookie')
+assert.match(setCookie, /^__Host-rmusic_proxy=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+;/)
+assert.match(setCookie, /HttpOnly/)
+assert.match(setCookie, /Secure/)
+assert.match(setCookie, /SameSite=Strict/)
+assert.doesNotMatch(setCookie, /independent-proxy-signing-secret|server-only-secret/)
+const sessionBody = await sessionResponse.json()
+assert.equal(sessionBody.authenticated, true)
+assert.ok(sessionBody.expiresAt > sessionBody.refreshAfter)
+const proxyCookie = setCookie.split(';')[0]
+
+function proxyRequest (path, init = {}) {
+  const headers = new Headers(init.headers)
+  headers.set('cookie', proxyCookie)
+  headers.set('cf-connecting-ip', '203.0.113.99')
+  headers.set('sec-fetch-site', 'same-origin')
+  return request(path, { ...init, headers })
+}
+
+const tamperedCookie = proxyCookie.slice(0, -1) + (proxyCookie.endsWith('A') ? 'B' : 'A')
+const tamperedProxy = await request('/api/proxy/v2/sources', {
+  headers: { cookie: tamperedCookie, 'cf-connecting-ip': '203.0.113.99', 'sec-fetch-site': 'same-origin' }
+})
+assert.equal(tamperedProxy.status, 401)
+
+const copiedToAnotherNetwork = await request('/api/proxy/v2/sources', {
+  headers: { cookie: proxyCookie, 'cf-connecting-ip': '198.51.100.10', 'sec-fetch-site': 'same-origin' }
+})
+assert.equal(copiedToAnotherNetwork.status, 401)
+
+const crossSiteCookieReuse = await request('/api/proxy/v2/sources', {
+  headers: { cookie: proxyCookie, 'cf-connecting-ip': '203.0.113.99', 'sec-fetch-site': 'cross-site' }
+})
+assert.equal(crossSiteCookieReuse.status, 401)
+
+const search = await proxyRequest('/api/proxy/v2/tracks?query=Night%20Drive&source=netease')
 assert.equal(search.status, 200)
 assert.equal(search.headers.get('x-rmusic-api-version'), '2')
+assert.match(search.headers.get('cache-control'), /^private,/)
+assert.match(search.headers.get('vary'), /Cookie/i)
+assert.equal(search.headers.get('access-control-allow-origin'), null)
 const searchEnvelope = await search.json()
 const [track] = searchEnvelope.data
 assert.equal(track.album.name, 'City Lights')
@@ -343,7 +420,7 @@ assert.equal(track.links.artwork, '/api/proxy/v2/artworks/netease/cover-1')
 assert.equal(track.links.lyrics, '/api/proxy/v2/lyrics/netease/lyric-1')
 assert.equal(track.links.wordLyrics, '/api/proxy/v2/lyrics/netease/lyric-1?granularity=word')
 
-const sources = await request('/api/proxy/v2/sources')
+const sources = await proxyRequest('/api/proxy/v2/sources')
 assert.equal(sources.status, 200)
 const [source] = (await sources.json()).data
 assert.equal(source.id, 'netease')
@@ -351,55 +428,55 @@ assert.deepEqual(source.capabilities, ['search', 'playlist'])
 assert.equal(source.links.self, '/api/proxy/v2/sources/netease')
 assert.equal(source.links.stream, undefined)
 
-const tencentSearch = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=tencent')
+const tencentSearch = await proxyRequest('/api/proxy/v2/tracks?query=Night%20Drive&source=tencent')
 const [tencentTrack] = (await tencentSearch.json()).data
 assert.equal(tencentTrack.links.stream, '/api/proxy/v2/streams/tencent/audio-1')
 
-const aggregateSearch = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=all&limit=80')
+const aggregateSearch = await proxyRequest('/api/proxy/v2/tracks?query=Night%20Drive&source=all&limit=80')
 assert.equal(aggregateSearch.status, 200)
 assert.equal(aggregateSearch.headers.get('x-rmusic-sources'), 'netease,tencent')
 const aggregateTracks = (await aggregateSearch.json()).data
 assert.equal(aggregateTracks[0].title, 'Night Drive')
 assert.equal(aggregateTracks[1].title, 'Night Drive (Live)')
 
-const batchTracks = await request('/api/proxy/v2/tracks/netease?ids=track-1')
+const batchTracks = await proxyRequest('/api/proxy/v2/tracks/netease?ids=track-1')
 assert.equal(batchTracks.status, 200)
 assert.equal((await batchTracks.json()).data[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
 
-const discovery = await request('/api/proxy/v2/discovery?source=netease%2Ctencent&limit=8')
+const discovery = await proxyRequest('/api/proxy/v2/discovery?source=netease%2Ctencent&limit=8')
 assert.equal(discovery.status, 200)
 assert.equal(discovery.headers.get('etag'), '"discovery-etag"')
 assert.equal(discovery.headers.get('x-cache-source'), 'd1-v2-hit')
 const discoveryData = (await discovery.json()).data
 assert.equal(discoveryData.recommendations[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
 assert.equal(discoveryData.charts[0].links.stream, '/api/proxy/v2/streams/tencent/chart-audio')
-const unchangedDiscovery = await request('/api/proxy/v2/discovery?source=netease%2Ctencent&limit=8', {
+const unchangedDiscovery = await proxyRequest('/api/proxy/v2/discovery?source=netease%2Ctencent&limit=8', {
   headers: { 'if-none-match': '"discovery-etag"' }
 })
 assert.equal(unchangedDiscovery.status, 304)
 assert.equal(new Headers(calls.at(-1).init.headers).get('if-none-match'), '"discovery-etag"')
 
-const album = await request('/api/proxy/v2/albums/netease/album-1')
+const album = await proxyRequest('/api/proxy/v2/albums/netease/album-1')
 assert.equal(album.status, 200)
 const albumData = (await album.json()).data
 assert.equal(albumData.links.tracks, '/api/proxy/v2/albums/netease/album-1/tracks')
 assert.equal(albumData.tracks.items[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
-const albumTracks = await request(albumData.links.tracks)
+const albumTracks = await proxyRequest(albumData.links.tracks)
 assert.equal(albumTracks.status, 200)
 
-const artist = await request('/api/proxy/v2/artists/netease/artist-1')
+const artist = await proxyRequest('/api/proxy/v2/artists/netease/artist-1')
 assert.equal(artist.status, 200)
 const artistData = (await artist.json()).data
 assert.equal(artistData.links.albums, '/api/proxy/v2/artists/netease/artist-1/albums')
-const artistAlbums = await request(artistData.links.albums)
+const artistAlbums = await proxyRequest(artistData.links.albums)
 assert.equal(artistAlbums.status, 200)
 assert.equal((await artistAlbums.json()).data[0].links.self, '/api/proxy/v2/albums/netease/album-1')
 
-const streamOptions = await request('/api/proxy/v2/streams/netease/audio-1/options')
+const streamOptions = await proxyRequest('/api/proxy/v2/streams/netease/audio-1/options')
 assert.equal(streamOptions.status, 200)
 assert.equal((await streamOptions.json()).data.qualities[0].id, 'high')
 
-const playlist = await request('/api/proxy/v2/playlists/netease/3778678?offset=0&limit=100')
+const playlist = await proxyRequest('/api/proxy/v2/playlists/netease/3778678?offset=0&limit=100')
 assert.equal(playlist.status, 200)
 const playlistData = (await playlist.json()).data
 assert.equal(playlistData.name, 'Midnight Drive Collection')
@@ -409,7 +486,7 @@ assert.equal(playlistData.cover, 'https://img.example/playlist.jpg')
 assert.equal(playlistData.tracks.items[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
 
 const autoPlaylistCallStart = calls.length
-const autoPlaylist = await request('/api/proxy/v2/playlists/aggregate/auto-qq?offset=0&limit=100')
+const autoPlaylist = await proxyRequest('/api/proxy/v2/playlists/aggregate/auto-qq?offset=0&limit=100')
 assert.equal(autoPlaylist.status, 200)
 const autoPlaylistData = (await autoPlaylist.json()).data
 assert.equal(autoPlaylistData.source, 'tencent')
@@ -419,23 +496,23 @@ assert.deepEqual(
   ['/api/v2/playlists/netease/auto-qq', '/api/v2/playlists/tencent/auto-qq']
 )
 
-const refreshedPlaylist = await request('/api/proxy/v2/playlists/netease/3778678?offset=0&limit=100&refresh=true')
+const refreshedPlaylist = await proxyRequest('/api/proxy/v2/playlists/netease/3778678?offset=0&limit=100&refresh=true')
 assert.equal(refreshedPlaylist.status, 200)
 assert.equal(calls.at(-1).url.searchParams.get('refresh'), 'true')
 
-const lyrics = await request(track.links.wordLyrics)
+const lyrics = await proxyRequest(track.links.wordLyrics)
 assert.equal(lyrics.status, 200)
 assert.match(await lyrics.text(), /Night Drive/)
 assert.equal(calls.at(-1).url.searchParams.get('granularity'), 'word')
 
-const audio = await request(track.links.stream + '?quality=high', { headers: { range: 'bytes=0-4' } })
+const audio = await proxyRequest(track.links.stream + '?quality=high', { headers: { range: 'bytes=0-4' } })
 assert.equal(audio.status, 206)
 assert.equal(audio.headers.get('accept-ranges'), 'bytes')
 assert.equal(audio.headers.get('x-meting-quality'), 'high')
 assert.equal(new Headers(calls.at(-1).init.headers).get('range'), 'bytes=0-4')
 assert.equal(calls.at(-1).url.searchParams.get('quality'), 'high')
 
-const flac = await request('/api/proxy/v2/streams/netease/flac-audio?quality=auto')
+const flac = await proxyRequest('/api/proxy/v2/streams/netease/flac-audio?quality=auto')
 assert.equal(flac.status, 200)
 assert.equal(flac.headers.get('content-type'), 'audio/flac')
 assert.equal(flac.headers.get('x-meting-codec'), 'flac')
@@ -443,11 +520,11 @@ assert.equal(flac.headers.get('content-length'), String('fLaC-v2-audio'.length))
 assert.equal(await flac.text(), 'fLaC-v2-audio')
 
 const failedCallStart = calls.length
-const unavailable = await request('/api/proxy/v2/streams/tencent/blocked?quality=lossless')
+const unavailable = await proxyRequest('/api/proxy/v2/streams/tencent/blocked?quality=lossless')
 assert.equal(unavailable.status, 403)
 assert.equal(unavailable.headers.get('x-rmusic-fallback'), null)
 assert.deepEqual(calls.slice(failedCallStart).map(({ url }) => url.pathname), ['/api/v2/streams/tencent/blocked'])
 assert.equal(calls.at(-1).url.searchParams.get('quality'), 'lossless')
 assert.equal(unavailable.headers.get('cache-control'), 'no-store')
 
-console.log('smoke: V2 discovery, catalog, cache refresh, audio formats and no alternate-source fallback passed')
+console.log('smoke: signed proxy sessions, V2 resources, cache refresh, audio formats and no alternate-source fallback passed')
