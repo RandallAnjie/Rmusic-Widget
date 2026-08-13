@@ -160,7 +160,7 @@ final class RMusicAppModel {
     }
 
     func openArtist(for track: Track) {
-        guard let artist = track.artists.first, let id = artist.id, !id.isEmpty else {
+        guard let artist = track.artists.first, let id = artist.catalogID(for: track.source) else {
             openSearch(query: track.artists.first?.name ?? track.artistsText)
             return
         }

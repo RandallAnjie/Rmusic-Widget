@@ -72,4 +72,14 @@ final class CoreModelsTests: XCTestCase {
         XCTAssertEqual(playlist.cachedAt.timeIntervalSince1970, 1_700_000_000, accuracy: 0.001)
         XCTAssertEqual(playlist.savedAt.timeIntervalSince1970, 1_700_000_001, accuracy: 0.001)
     }
+
+    func testTencentLegacyNumericArtistFallsBackFromDetailNavigation() {
+        let legacyTencent = ArtistReference(id: "60505", name: "李荣浩")
+        let canonicalTencent = ArtistReference(id: "000aHmbL2aPXWH", name: "李荣浩")
+        let numericNetease = ArtistReference(id: "6452", name: "周杰伦")
+
+        XCTAssertNil(legacyTencent.catalogID(for: .tencent))
+        XCTAssertEqual(canonicalTencent.catalogID(for: .tencent), "000aHmbL2aPXWH")
+        XCTAssertEqual(numericNetease.catalogID(for: .netease), "6452")
+    }
 }
