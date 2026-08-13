@@ -1,8 +1,9 @@
-// Signed, short-lived browser sessions for the token-injecting proxy.
+// Signed, short-lived sessions for the token-injecting proxy.
 //
 // The HMAC secret never leaves the Worker. The browser receives only an
 // HttpOnly, Secure, SameSite=Strict cookie, so other sites cannot reuse a
-// visitor's proxy authority through fetch(), <img> or <audio> hotlinks.
+// visitor's proxy authority through fetch(), <img> or <audio> hotlinks. A
+// verified native RMusic Bearer may issue the same cookie for URLSession.
 
 import { clientIp } from './rate-limit.js'
 
@@ -106,23 +107,33 @@ function samePublicOrigin (request, originValue) {
 
 export function trustedSessionBootstrap (request) {
   if (request.method !== 'POST') return false
-  if (request.headers.get('x-rmusic-client') !== 'widget-v2') return false
+  const client = request.headers.get('x-rmusic-client')
+  if (client !== 'widget-v2' && client !== 'ios-v1') return false
   const fetchSite = request.headers.get('sec-fetch-site')
-  if (fetchSite && fetchSite !== 'same-origin') return false
+  if (client === 'widget-v2' && fetchSite && fetchSite !== 'same-origin') return false
+  // URLSession does not send browser Fetch Metadata. Requiring its absence for
+  // iOS prevents page JavaScript from impersonating the native bootstrap.
+  if (client === 'ios-v1' && fetchSite) return false
   return samePublicOrigin(request, request.headers.get('origin'))
 }
 
-export async function issueProxySession (request, config) {
+export async function issueProxySession (request, config, accountSessionId = '') {
   const now = Math.floor(Date.now() / 1000)
   const ttl = config.proxySession.ttlSeconds
-  const payload = base64UrlEncode(JSON.stringify({
+  const claims = {
     v: SESSION_VERSION,
     aud: audience(request),
     ip: await clientFingerprint(request),
     sid: randomSessionId(),
     iat: now,
     exp: now + ttl
-  }))
+  }
+  // A native RMusic bearer can bootstrap the same short-lived HttpOnly
+  // proxy cookie used by the widget. The database session identifier is not
+  // itself a credential and is covered by the proxy HMAC; it lets playback
+  // re-check revocation without putting either bearer token in the cookie.
+  if (accountSessionId) claims.rsid = String(accountSessionId)
+  const payload = base64UrlEncode(JSON.stringify(claims))
   const signature = await signatureFor(config.proxySession.signingSecret, `rmusic-proxy-session:${payload}`)
   const token = `${payload}.${signature}`
   const headers = new Headers({
@@ -132,6 +143,7 @@ export async function issueProxySession (request, config) {
   })
   return new Response(JSON.stringify({
     authenticated: true,
+    accountAuthenticated: Boolean(accountSessionId),
     expiresAt: (now + ttl) * 1000,
     refreshAfter: (now + Math.floor(ttl / 2)) * 1000
   }), { status: 201, headers })
@@ -160,6 +172,7 @@ export async function verifyProxySession (request, config) {
     if (typeof payload.sid !== 'string' || payload.sid.length < 12) return null
     if (!Number.isFinite(payload.iat) || payload.iat > now + 60) return null
     if (!Number.isFinite(payload.exp) || payload.exp <= now) return null
+    if (payload.rsid !== undefined && (typeof payload.rsid !== 'string' || payload.rsid.length < 8 || payload.rsid.length > 128)) return null
     return payload
   } catch {
     return null
@@ -171,14 +184,14 @@ export function proxyUnauthorized () {
     type: 'about:blank',
     title: 'ProxySessionRequired',
     status: 401,
-    detail: '请先从 RMusic 页面建立短期代理会话',
+    detail: '请先建立 RMusic 短期代理会话，或提供有效的手机客户端 Bearer',
     apiVersion: '2'
   }, {
     status: 401,
     headers: {
       'content-type': 'application/problem+json; charset=utf-8',
       'cache-control': 'no-store',
-      'www-authenticate': 'RMusicSession realm="RMusic Widget"'
+      'www-authenticate': 'RMusicSession realm="RMusic Widget", Bearer realm="RMusic Native"'
     }
   })
 }
@@ -188,7 +201,7 @@ export function proxyForbidden () {
     type: 'about:blank',
     title: 'Forbidden',
     status: 403,
-    detail: '代理会话只能由同源 RMusic 页面签发',
+    detail: '代理会话只能由同源 RMusic 页面或已授权手机客户端签发',
     apiVersion: '2'
   }, {
     status: 403,
@@ -209,6 +222,7 @@ export function privateProxyResponse (response) {
     headers.set('cache-control', 'no-store')
   }
   headers.append('vary', 'Cookie')
+  headers.append('vary', 'Authorization')
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

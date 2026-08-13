@@ -9,6 +9,7 @@
 5. 添加环境变量：`MUSIC_API_TOKEN`，值与 Meting-API 的 `METING_TOKEN` 一致。
 6. 添加 secret：`PROXY_SIGNING_SECRET`，使用独立的 32 字节以上随机值。
 7. 创建 D1 数据库并以 `AUTH_DB` 绑定到 Pages 项目，用于 RMusic ID、设备密钥和个人音乐库；执行 `migrations/0001_rmusic_auth.sql` 与 `migrations/0002_account_library.sql`。
+8. iOS 上线前添加环境变量：`AUTH_ORIGIN=https://music.bigrandall.io`、`AUTH_RP_ID=music.bigrandall.io`、`AUTH_NATIVE_ORIGINS=https://music.bigrandall.io`。
 
 如果两个 worker 不在同一租户，可以不设置 `MUSIC_API`，改用：
 
@@ -50,6 +51,8 @@ AUTH_REGISTRATION_RATE_MAX=10
 - `widget.css` / `widget.js` 的 hash URL 返回 `immutable` 缓存，支持 Brotli/Gzip
 - 顶部或手机底部“账号”可直接使用 Face ID、Touch ID、Windows Hello 或设备 PIN 创建与登录 RMusic ID
 - 刷新页面后仍保持登录；账号中心可添加/移除设备密钥并注销其他会话
+- `/.well-known/apple-app-site-association` 直接返回 `200` + `Content-Type: application/json`，JSON 中的 `webcredentials.apps` 只包含 `N9B2H32Q94.io.bigrandall.rmusic`
+- iOS 用户端通过 `sessionMode: bearer` 取得的 `rmu_…` 只保存在 Keychain；请求 `/api/proxy/v2/*` 时上游收到的仍只是 `MUSIC_API_TOKEN`
 
 也可以验证 deep link：
 
@@ -66,6 +69,7 @@ AUTH_REGISTRATION_RATE_MAX=10
 - `AuthUnavailable`：用户系统缺少 `AUTH_DB` D1 binding。
 - `AuthenticationRequired`：音频或个人音乐库请求没有有效 RMusic ID 会话；使用设备密钥登录后重试。
 - `ProxySessionRequired`：请求没有有效的本站短期会话；刷新 RMusic 页面会自动重新签发。
+- iOS verify 成功但没有 `accessToken`：检查三个 `AUTH_*` 值、`Origin: https://music.bigrandall.io`、`X-RMusic-Client: ios-v1` 以及请求是否由 URLSession 发出（不应含 `Sec-Fetch-Site`）。
 - `429 rate limit exceeded`：提高 `RATE_MAX`，或检查页面是否发生请求循环。
 - Meting-API 返回 401：两个 worker 的 token 不一致。
 - 聚合搜索结果偏少：查看 `X-RMusic-Sources`，确认哪些平台本次成功响应；单个平台失败不会中断其他结果。

@@ -284,6 +284,39 @@ export async function resolveAuthenticatedUser (request, env) {
   }
 }
 
+// Resolve the account bound into a signed native proxy cookie. Session IDs
+// are not bearer credentials, so callers must only use this after verifying
+// the enclosing proxy-session HMAC. Restricting the lookup to native sessions
+// also prevents a widget proxy cookie from being upgraded into account access.
+export async function resolveAuthenticatedNativeSession (request, env, sessionId) {
+  const config = authConfig(request, env)
+  if (!config.db) return { available: false, db: null, userId: null, session: null, origin: config.origin }
+  if (typeof sessionId !== 'string' || sessionId.length < 8 || sessionId.length > 128) {
+    return { available: true, db: config.db, userId: null, session: null, origin: config.origin }
+  }
+  await ensureSchema(config.db)
+  const now = Date.now()
+  const row = await config.db.prepare(`
+    SELECT s.*, u.display_name, u.created_at AS user_created_at, u.last_login_at,
+      (SELECT COUNT(*) FROM rmusic_credentials c WHERE c.user_id = u.id) AS passkey_count
+    FROM rmusic_user_sessions s
+    JOIN rmusic_users u ON u.id = s.user_id
+    WHERE s.id = ? AND s.kind = 'native' AND s.revoked_at IS NULL AND s.expires_at > ?
+  `).bind(sessionId, now).first()
+  if (!row) return { available: true, db: config.db, userId: null, session: null, origin: config.origin }
+  if (now - Number(row.last_used_at || 0) > 5 * 60_000) {
+    await config.db.prepare('UPDATE rmusic_user_sessions SET last_used_at = ?, last_ip_hash = ? WHERE id = ?')
+      .bind(now, await sha256(clientIp(request) || '<unknown>'), row.id).run()
+  }
+  return {
+    available: true,
+    db: config.db,
+    userId: row.user_id,
+    session: row,
+    origin: config.origin
+  }
+}
+
 async function storeChallenge (db, challenge) {
   await db.prepare(`
     INSERT INTO rmusic_auth_challenges
@@ -515,7 +548,7 @@ async function createSessionResponse (request, config, user, verifiedOrigin, req
   const now = Date.now()
   const expiresAt = now + config.sessionTtlMs
   const token = `rmu_${base64UrlEncode(randomBytes())}`
-  const native = requestedMode === 'bearer' && config.nativeOrigins.includes(verifiedOrigin)
+  const native = isNativeSessionRequest(request, config, verifiedOrigin, requestedMode)
   const sessionId = crypto.randomUUID()
   await config.db.prepare(`
     INSERT INTO rmusic_user_sessions
@@ -542,6 +575,20 @@ async function createSessionResponse (request, config, user, verifiedOrigin, req
   return json(200, body, {
     'set-cookie': userCookie(token, expiresAt)
   })
+}
+
+// AuthenticationServices deliberately reports the same HTTPS origin as the
+// web RP, so clientDataJSON cannot by itself distinguish the native app from
+// the widget. Browser Fetch Metadata is a useful additional boundary: normal
+// URLSession requests do not send Sec-Fetch-Site, while browser fetch() does
+// and script cannot remove or forge that forbidden header. The associated
+// domain still provides the primary OS-level app/RP binding.
+export function isNativeSessionRequest (request, config, verifiedOrigin, requestedMode) {
+  if (requestedMode !== 'bearer') return false
+  if (!config.nativeOrigins.includes(verifiedOrigin)) return false
+  if (request.headers.get('origin') !== verifiedOrigin) return false
+  if (request.headers.get('x-rmusic-client') !== 'ios-v1') return false
+  return !request.headers.has('sec-fetch-site')
 }
 
 async function sessionStatus (request, config) {

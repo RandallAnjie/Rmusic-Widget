@@ -29,7 +29,7 @@ export function buildConfig (env) {
       token: env.MUSIC_API_TOKEN || ''
     },
     proxySession: {
-      // Dedicated HMAC key for the browser-only /api/proxy surface. Falling
+      // Dedicated HMAC key for the signed-cookie /api/proxy surface. Falling
       // back to MUSIC_API_TOKEN keeps existing deployments working, but a
       // separate random secret is recommended so either key can be rotated
       // independently.

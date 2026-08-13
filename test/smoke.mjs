@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { brotliDecompressSync } from 'node:zlib'
 import worker from '../dist/_worker.js'
+import { isNativeSessionRequest } from '../src/auth.js'
 import { FakeD1 } from './fake-d1.mjs'
 
 const calls = []
@@ -81,6 +82,9 @@ function searchResponse (url) {
 
 const env = {
   AUTH_DB: new FakeD1(),
+  AUTH_ORIGIN: 'https://rmusic.test',
+  AUTH_RP_ID: 'rmusic.test',
+  AUTH_NATIVE_ORIGINS: 'https://rmusic.test',
   MUSIC_API_TOKEN: 'server-only-secret',
   PROXY_SIGNING_SECRET: 'independent-proxy-signing-secret',
   RATE_MAX: '1000',
@@ -140,7 +144,11 @@ const env = {
           return Response.json(envelope([{
             id: 'album-1', source, type: 'album', name: 'Artist Album',
             releaseDate: '2025-06-01T00:00:00.000Z', albumType: 'album',
-            artwork: { url: 'https://img.example/album.jpg' }, stats: { trackCount: 12 },
+            artwork: {
+              url: `https://music.example/api/v2/artworks/${source}/album-cover?auth=old`,
+              originalUrl: 'https://img.example/album.jpg'
+            },
+            stats: { trackCount: 12 },
             links: { self: `https://music.example/api/v2/albums/${source}/album-1` }
           }], { total: 1 }))
         }
@@ -149,6 +157,10 @@ const env = {
           id,
           source,
           name: 'Complete catalog resource',
+          artwork: {
+            url: `https://music.example/api/v2/artworks/${source}/catalog-cover?token=old`,
+            originalUrl: 'https://img.example/catalog.jpg'
+          },
           links: {
             tracks: `https://music.example${url.pathname}/${url.pathname.includes('/artists/') ? 'top-tracks' : 'tracks'}`,
             ...(url.pathname.includes('/artists/') ? { albums: `https://music.example${url.pathname}/albums` } : {})
@@ -251,6 +263,29 @@ assert.match(html, /id="loginPasskey"/)
 assert.doesNotMatch(html, /server-only-secret/)
 assert.match(home.headers.get('content-security-policy'), /frame-ancestors 'none'/)
 assert.match(home.headers.get('permissions-policy'), /publickey-credentials-create=\(self\)/)
+
+const appleAssociation = await request('/.well-known/apple-app-site-association')
+assert.equal(appleAssociation.status, 200)
+assert.equal(appleAssociation.headers.get('content-type'), 'application/json')
+assert.match(appleAssociation.headers.get('cache-control'), /public/)
+assert.match(appleAssociation.headers.get('cache-control'), /max-age=3600/)
+assert.match(appleAssociation.headers.get('cache-control'), /s-maxage=86400/)
+assert.equal(appleAssociation.headers.get('x-content-type-options'), 'nosniff')
+assert.deepEqual(await appleAssociation.json(), {
+  webcredentials: { apps: ['N9B2H32Q94.io.bigrandall.rmusic'] }
+})
+const associationEtag = appleAssociation.headers.get('etag')
+assert.ok(associationEtag)
+const unchangedAssociation = await request('/.well-known/apple-app-site-association', {
+  headers: { 'if-none-match': associationEtag }
+})
+assert.equal(unchangedAssociation.status, 304)
+const associationHead = await request('/.well-known/apple-app-site-association', { method: 'HEAD' })
+assert.equal(associationHead.status, 200)
+assert.equal(await associationHead.text(), '')
+const associationWrite = await request('/.well-known/apple-app-site-association', { method: 'POST' })
+assert.equal(associationWrite.status, 405)
+assert.equal(associationWrite.headers.get('allow'), 'GET, HEAD')
 
 const sourceHtml = fs.readFileSync(new URL('../src/widget/index.html', import.meta.url), 'utf8')
 const clientSource = fs.readFileSync(new URL('../src/widget/client.js', import.meta.url), 'utf8')
@@ -397,6 +432,39 @@ assert.equal(login.options.rpId, 'rmusic.test')
 assert.equal(login.options.userVerification, 'required')
 assert.equal(login.options.allowCredentials, undefined)
 
+const nativeLoginOptions = await request('/api/auth/login/options', {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    origin: 'https://rmusic.test',
+    'x-rmusic-client': 'ios-v1'
+  },
+  body: '{}'
+})
+assert.equal(nativeLoginOptions.status, 200, 'URLSession-style auth requests must pass the same-origin guard')
+
+const nativeOriginConfig = { nativeOrigins: ['https://rmusic.test'] }
+const nativeCeremony = new Request('https://rmusic.test/api/auth/login/verify', {
+  method: 'POST',
+  headers: { origin: 'https://rmusic.test', 'x-rmusic-client': 'ios-v1' }
+})
+assert.equal(isNativeSessionRequest(nativeCeremony, nativeOriginConfig, 'https://rmusic.test', 'bearer'), true)
+const browserCeremony = new Request('https://rmusic.test/api/auth/login/verify', {
+  method: 'POST',
+  headers: {
+    origin: 'https://rmusic.test',
+    'x-rmusic-client': 'ios-v1',
+    'sec-fetch-site': 'same-origin'
+  }
+})
+assert.equal(
+  isNativeSessionRequest(browserCeremony, nativeOriginConfig, 'https://rmusic.test', 'bearer'),
+  false,
+  'same-origin browser JavaScript must not turn a passkey result into an extractable bearer'
+)
+assert.equal(isNativeSessionRequest(nativeCeremony, nativeOriginConfig, 'https://rmusic.test', 'cookie'), false)
+assert.equal(isNativeSessionRequest(nativeCeremony, nativeOriginConfig, 'https://attacker.example', 'bearer'), false)
+
 const directUnauthenticated = await request('/api/v2/sources')
 assert.equal(directUnauthenticated.status, 401)
 assert.equal(directUnauthenticated.headers.get('access-control-allow-origin'), '*')
@@ -446,6 +514,29 @@ assert.equal(crossOriginSession.status, 403)
 assert.equal(crossOriginSession.headers.get('set-cookie'), null)
 assert.equal(crossOriginSession.headers.get('access-control-allow-origin'), null)
 
+const anonymousNativeSession = await request('/api/proxy/session', {
+  method: 'POST',
+  headers: {
+    origin: 'https://rmusic.test',
+    'cf-connecting-ip': '203.0.113.41',
+    'x-rmusic-client': 'ios-v1'
+  }
+})
+assert.equal(anonymousNativeSession.status, 201)
+assert.equal((await anonymousNativeSession.json()).accountAuthenticated, false)
+assert.match(anonymousNativeSession.headers.get('set-cookie'), /^__Host-rmusic_proxy=/)
+
+const browserNativeImpersonation = await request('/api/proxy/session', {
+  method: 'POST',
+  headers: {
+    origin: 'https://rmusic.test',
+    'sec-fetch-site': 'same-origin',
+    'x-rmusic-client': 'ios-v1'
+  }
+})
+assert.equal(browserNativeImpersonation.status, 401)
+assert.equal(browserNativeImpersonation.headers.get('set-cookie'), null)
+
 const sessionResponse = await request('/api/proxy/session', {
   method: 'POST',
   headers: {
@@ -467,6 +558,7 @@ assert.match(setCookie, /SameSite=Strict/)
 assert.doesNotMatch(setCookie, /independent-proxy-signing-secret|server-only-secret/)
 const sessionBody = await sessionResponse.json()
 assert.equal(sessionBody.authenticated, true)
+assert.equal(sessionBody.accountAuthenticated, false)
 assert.ok(sessionBody.expiresAt > sessionBody.refreshAfter)
 const proxyCookie = setCookie.split(';')[0]
 let accountCookie = ''
@@ -489,6 +581,7 @@ assert.equal(anonymousTrailingSlashStream.status, 401)
 assert.equal(calls.length, anonymousStreamCallStart, 'a trailing slash must not bypass playback authentication')
 
 const accountToken = 'rmu_smoke_account_token'
+const nativeAccountToken = 'rmu_smoke_native_account_token'
 const accountUserId = 'smoke-user-1'
 const now = Date.now()
 await env.AUTH_DB.batch([
@@ -500,7 +593,12 @@ await env.AUTH_DB.batch([
     INSERT INTO rmusic_user_sessions
       (id, token_hash, user_id, kind, created_at, expires_at, last_used_at, user_agent, last_ip_hash)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind('smoke-session-1', await tokenHash(accountToken), accountUserId, 'web', now, now + 86_400_000, now, 'Smoke Browser', 'smoke-ip')
+  `).bind('smoke-session-1', await tokenHash(accountToken), accountUserId, 'web', now, now + 86_400_000, now, 'Smoke Browser', 'smoke-ip'),
+  env.AUTH_DB.prepare(`
+    INSERT INTO rmusic_user_sessions
+      (id, token_hash, user_id, kind, created_at, expires_at, last_used_at, user_agent, last_ip_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind('smoke-native-session-1', await tokenHash(nativeAccountToken), accountUserId, 'native', now, now + 86_400_000, now, 'RMusic iOS', 'native-ip')
 ])
 accountCookie = `__Host-rmusic_user=${accountToken}`
 
@@ -613,6 +711,100 @@ const crossSiteCookieReuse = await request('/api/proxy/v2/sources', {
 })
 assert.equal(crossSiteCookieReuse.status, 401)
 
+const webBearerProxy = await request('/api/proxy/v2/sources', {
+  headers: { authorization: `Bearer ${accountToken}` }
+})
+assert.equal(webBearerProxy.status, 401, 'a web session token must not become native proxy authority')
+
+const invalidNativeBootstrap = await request('/api/proxy/session', {
+  method: 'POST',
+  headers: {
+    authorization: 'Bearer rmu_invalid_native_token',
+    origin: 'https://rmusic.test',
+    'x-rmusic-client': 'ios-v1',
+    'cf-connecting-ip': '198.18.0.20'
+  }
+})
+assert.equal(invalidNativeBootstrap.status, 401)
+assert.equal(invalidNativeBootstrap.headers.get('set-cookie'), null)
+
+const nativeBootstrap = await request('/api/proxy/session', {
+  method: 'POST',
+  headers: {
+    authorization: `Bearer ${nativeAccountToken}`,
+    origin: 'https://rmusic.test',
+    'x-rmusic-client': 'ios-v1',
+    'cf-connecting-ip': '198.18.0.20'
+  }
+})
+assert.equal(nativeBootstrap.status, 201)
+assert.equal(nativeBootstrap.headers.get('access-control-allow-origin'), 'https://rmusic.test')
+const nativeBootstrapBody = await nativeBootstrap.json()
+assert.equal(nativeBootstrapBody.authenticated, true)
+assert.equal(nativeBootstrapBody.accountAuthenticated, true)
+const nativeProxyCookie = nativeBootstrap.headers.get('set-cookie').split(';')[0]
+assert.doesNotMatch(nativeProxyCookie, /smoke-native-session|native_account_token/)
+
+const nativeCookieSearch = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=netease', {
+  headers: { cookie: nativeProxyCookie, 'cf-connecting-ip': '198.18.0.44' }
+})
+assert.equal(nativeCookieSearch.status, 200)
+assert.match(nativeCookieSearch.headers.get('vary'), /Authorization/i)
+const nativeCookieAudio = await request('/api/proxy/v2/streams/netease/audio-1', {
+  headers: { cookie: nativeProxyCookie, 'cf-connecting-ip': '198.18.0.44', range: 'bytes=0-4' }
+})
+assert.equal(nativeCookieAudio.status, 206, 'a native bootstrap cookie must retain account playback authority')
+
+const movedNativeCookie = await request('/api/proxy/v2/sources', {
+  headers: { cookie: nativeProxyCookie, 'cf-connecting-ip': '198.19.0.44' }
+})
+assert.equal(movedNativeCookie.status, 401)
+
+const nativeBearerSearch = await request('/api/proxy/v2/tracks?query=Night%20Drive&source=netease', {
+  headers: { authorization: `Bearer ${nativeAccountToken}`, 'cf-connecting-ip': '198.19.0.44' }
+})
+assert.equal(nativeBearerSearch.status, 200, 'native bearer must remain usable after an IP/network change')
+assert.equal(new Headers(calls.at(-1).init.headers).get('authorization'), 'Bearer server-only-secret')
+assert.match(nativeBearerSearch.headers.get('vary'), /Authorization/i)
+assert.equal(nativeBearerSearch.headers.get('access-control-allow-origin'), null)
+
+const nativeBearerAudio = await request('/api/proxy/v2/streams/netease/audio-1', {
+  headers: { authorization: `Bearer ${nativeAccountToken}`, range: 'bytes=0-4' }
+})
+assert.equal(nativeBearerAudio.status, 206)
+const nativeAccountStatus = await request('/api/auth/session', {
+  headers: { authorization: `Bearer ${nativeAccountToken}` }
+})
+assert.equal(nativeAccountStatus.status, 200)
+assert.equal((await nativeAccountStatus.json()).session.kind, 'native')
+const nativeLibrary = await request('/api/auth/library', {
+  headers: { authorization: `Bearer ${nativeAccountToken}` }
+})
+assert.equal(nativeLibrary.status, 200)
+
+const crossSiteNativeBearer = await request('/api/proxy/v2/sources', {
+  headers: {
+    authorization: `Bearer ${nativeAccountToken}`,
+    origin: 'https://attacker.example',
+    'sec-fetch-site': 'cross-site'
+  }
+})
+assert.equal(crossSiteNativeBearer.status, 401)
+
+await env.AUTH_DB.prepare('UPDATE rmusic_user_sessions SET revoked_at = ? WHERE id = ?')
+  .bind(Date.now(), 'smoke-native-session-1').run()
+const revokedNativeCallStart = calls.length
+const revokedNativeCookieAudio = await request('/api/proxy/v2/streams/netease/audio-1', {
+  headers: { cookie: nativeProxyCookie, 'cf-connecting-ip': '198.18.0.44' }
+})
+assert.equal(revokedNativeCookieAudio.status, 401)
+assert.match(revokedNativeCookieAudio.headers.get('www-authenticate'), /^Passkey/)
+const revokedNativeBearer = await request('/api/proxy/v2/sources', {
+  headers: { authorization: `Bearer ${nativeAccountToken}` }
+})
+assert.equal(revokedNativeBearer.status, 401)
+assert.equal(calls.length, revokedNativeCallStart, 'revoked native auth must not reach Meting')
+
 const search = await proxyRequest('/api/proxy/v2/tracks?query=Night%20Drive&source=netease')
 assert.equal(search.status, 200)
 assert.equal(search.headers.get('x-rmusic-api-version'), '2')
@@ -669,6 +861,7 @@ const album = await proxyRequest('/api/proxy/v2/albums/netease/album-1')
 assert.equal(album.status, 200)
 const albumData = (await album.json()).data
 assert.equal(albumData.links.tracks, '/api/proxy/v2/albums/netease/album-1/tracks')
+assert.equal(albumData.artwork.url, '/api/proxy/v2/artworks/netease/catalog-cover')
 assert.equal(albumData.tracks.items[0].links.stream, '/api/proxy/v2/streams/netease/audio-1')
 const albumTracks = await proxyRequest(albumData.links.tracks)
 assert.equal(albumTracks.status, 200)
@@ -679,7 +872,9 @@ const artistData = (await artist.json()).data
 assert.equal(artistData.links.albums, '/api/proxy/v2/artists/netease/artist-1/albums')
 const artistAlbums = await proxyRequest(artistData.links.albums)
 assert.equal(artistAlbums.status, 200)
-assert.equal((await artistAlbums.json()).data[0].links.self, '/api/proxy/v2/albums/netease/album-1')
+const artistAlbumData = (await artistAlbums.json()).data[0]
+assert.equal(artistAlbumData.links.self, '/api/proxy/v2/albums/netease/album-1')
+assert.equal(artistAlbumData.artwork.url, '/api/proxy/v2/artworks/netease/album-cover')
 
 const streamOptions = await proxyRequest('/api/proxy/v2/streams/netease/audio-1/options')
 assert.equal(streamOptions.status, 200)
@@ -736,4 +931,4 @@ assert.deepEqual(calls.slice(failedCallStart).map(({ url }) => url.pathname), ['
 assert.equal(calls.at(-1).url.searchParams.get('quality'), 'lossless')
 assert.equal(unavailable.headers.get('cache-control'), 'no-store')
 
-console.log('smoke: signed proxy sessions, V2 resources, cache refresh, audio formats and no alternate-source fallback passed')
+console.log('smoke: AASA, browser/native proxy auth, V2 resources, cache refresh, audio formats and no alternate-source fallback passed')
