@@ -198,6 +198,7 @@ import {
     consecutiveErrors: 0,
     account: {
       available: true,
+      resolved: false,
       authenticated: false,
       user: null,
       session: null,
@@ -696,7 +697,7 @@ import {
     const user = state.account.user
     const signedIn = state.account.authenticated && user
     els.openAccount.classList.toggle('signed-in', Boolean(signedIn))
-    els.accountTriggerLabel.textContent = signedIn ? user.displayName : '登录'
+    els.accountTriggerLabel.textContent = signedIn ? user.displayName : (state.account.resolved ? '登录' : '账号')
     els.accountAvatar.textContent = ''
     if (signedIn) {
       els.accountAvatar.textContent = accountInitials(user.displayName)
@@ -807,6 +808,7 @@ import {
     try {
       const status = await authFetch('/session')
       state.account.available = true
+      state.account.resolved = true
       state.account.authenticated = Boolean(status?.authenticated)
       state.account.user = status?.user || null
       state.account.session = status?.session || null
@@ -831,6 +833,7 @@ import {
       return status
     } catch (error) {
       if (error.status === 401) {
+        state.account.resolved = true
         state.account.authenticated = false
         state.account.user = null
         if (wasAuthenticated) stopAccountPlayback()
@@ -839,6 +842,7 @@ import {
         return null
       }
       state.account.available = false
+      state.account.resolved = true
       throw error
     }
   }
@@ -882,6 +886,7 @@ import {
         body: { flowId: begin.flowId, response, deviceName: deviceName() }
       })
       state.account.authenticated = true
+      state.account.resolved = true
       state.account.user = result.user
       state.account.session = result.session
       await refreshAccount(true)
@@ -898,6 +903,7 @@ import {
         body: { flowId: begin.flowId, response }
       })
       state.account.authenticated = true
+      state.account.resolved = true
       state.account.user = result.user
       state.account.session = result.session
       await refreshAccount(true)
@@ -947,6 +953,7 @@ import {
     try {
       await authFetch('/logout', { method: 'POST', body: {} })
       state.account.authenticated = false
+      state.account.resolved = true
       state.account.user = null
       state.account.session = null
       state.account.devices = []
@@ -2804,17 +2811,21 @@ import {
     setupMediaSession()
     els.lrcList.innerHTML = '<li class="lyrics-placeholder">播放歌曲后，这里会显示同步歌词。</li>'
 
-    try {
-      await ensureProxySession()
-    } catch (error) {
-      toast('安全会话建立失败：' + error.message, 'error')
-    }
     renderHome()
     renderLibrary()
-    await refreshAccount(false).catch(() => {
+    renderAccount()
+    const [proxyResult, accountResult] = await Promise.allSettled([
+      ensureProxySession(),
+      refreshAccount(false)
+    ])
+    if (proxyResult.status === 'rejected') {
+      toast('安全会话建立失败：' + proxyResult.reason.message, 'error')
+    }
+    if (accountResult.status === 'rejected') {
       state.account.available = false
+      state.account.resolved = true
       renderAccount()
-    })
+    }
 
     const url = new URL(location.href)
     const type = url.searchParams.get('type')

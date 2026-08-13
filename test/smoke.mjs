@@ -333,6 +333,8 @@ assert.match(await js.text(), /rmusic_favorites_v2/)
 
 const anonymousAccount = await request('/api/auth/session')
 assert.equal(anonymousAccount.status, 200)
+assert.equal(anonymousAccount.headers.get('set-cookie'), null)
+assert.equal(anonymousAccount.headers.get('vary'), 'Cookie')
 assert.deepEqual(await anonymousAccount.json(), { authenticated: false })
 const anonymousLibrary = await request('/api/auth/library')
 assert.equal(anonymousLibrary.status, 401)
@@ -513,6 +515,14 @@ function libraryRequest (path, { method = 'GET', body, origin = 'https://rmusic.
 }
 
 const accountStatus = await request('/api/auth/session', { headers: { cookie: accountCookie } })
+const refreshedAccountCookie = accountStatus.headers.get('set-cookie')
+assert.match(refreshedAccountCookie, /^__Host-rmusic_user=rmu_[A-Za-z0-9_-]+;/)
+assert.match(refreshedAccountCookie, /Expires=[^;]+GMT/)
+assert.match(refreshedAccountCookie, /Max-Age=\d+/)
+assert.match(refreshedAccountCookie, /HttpOnly/)
+assert.match(refreshedAccountCookie, /Secure/)
+assert.match(refreshedAccountCookie, /SameSite=Lax/)
+assert.doesNotMatch(refreshedAccountCookie, /SameSite=Strict/)
 assert.equal((await accountStatus.json()).user.id, accountUserId)
 const emptyLibrary = await libraryRequest('')
 assert.equal(emptyLibrary.status, 200)
